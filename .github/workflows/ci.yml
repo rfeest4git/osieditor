@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.10.0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      # Runs all unit/integration tests, including the osi-schema
+      # import→export→diff round-trip test against the TPC-DS example.
+      - name: Test (incl. round-trip)
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # Bundle the API and smoke-test the production artifact end-to-end.
+      - name: Bundle API
+        run: pnpm --filter @osi-editor/api bundle
+
+      - name: Runtime smoke test
+        run: |
+          PORT=8080 node apps/api/dist/server.mjs &
+          API_PID=$!
+          # Wait for the server to accept connections.
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8080/health && break || sleep 0.5
+          done
+          BASE=http://localhost:8080 node scripts/smoke.mjs
+          RESULT=$?
+          kill "$API_PID" 2>/dev/null || true
+          exit $RESULT
