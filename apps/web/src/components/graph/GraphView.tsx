@@ -3,15 +3,30 @@ import { validate } from '@osi-editor/osi-schema';
 import {
   Background,
   Controls,
+  Panel,
   ReactFlow,
   type Connection,
   type Edge,
   type Node,
   type NodeChange,
+  type ReactFlowState,
+  ViewportPortal,
   applyNodeChanges,
+  useNodesInitialized,
+  useReactFlow,
+  useStore,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import {
+  type Dispatch,
+  type RefObject,
+  type SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import {
   getActiveModel,
   getOntologyComponents,
@@ -20,25 +35,215 @@ import {
 } from '../../store/editorStore.js';
 import { SelectionDetail } from '../editor/SelectionDetail.js';
 import { ConceptNode } from './ConceptNode.js';
+import { DatasetNode } from './DatasetNode.js';
 import { GraphEmptyState } from './GraphEmptyState.js';
 import { GraphToolbar } from './GraphToolbar.js';
+import { MetricNode } from './MetricNode.js';
 import {
+  arrangeBoxes,
   buildMappingLinks,
+  buildMetricRows,
   buildOntologyGraphModel,
   buildSemanticEdges,
+  computeRegionRects,
   conceptNames,
   conceptNodeId,
-  datasetLanePosition,
+  datasetFieldsById,
   datasetNodeId,
   gridPosition,
-  reconcilePositions,
+  layoutEstimatedBands,
+  metricNodeId,
   type ConceptAttribute,
+  type DomainNodeBounds,
+  type EstimatedItem,
+  type FieldRow,
+  type LayoutBox,
+  type RegionRect,
 } from './ontologyGraph.js';
 
 /** Custom node types for the ontology layer (expandable concept nodes). */
-const ontologyNodeTypes = { concept: ConceptNode };
+const ontologyNodeTypes = { concept: ConceptNode, dataset: DatasetNode, metric: MetricNode };
+/** Custom node types for the semantic-model layer (dataset + metric nodes). */
+const semanticNodeTypes = { dataset: DatasetNode, metric: MetricNode };
+
+/**
+ * Default edge routing: orthogonal `smoothstep` so connection lines run in clear
+ * horizontal/vertical segments (with the generous band gutters) instead of bezier
+ * curves that cut diagonally across nodes.
+ */
+const smoothEdges = { type: 'smoothstep' as const };
 
 const noop = () => {};
+
+/** Text of a dataset field row (name + optional detail), used to estimate node width. */
+const fieldRowText = (f: FieldRow): string => (f.detail ? `${f.name} ${f.detail}` : f.name);
+/** Text of a concept attribute row (name + value type), used to estimate node width. */
+const attrRowText = (a: ConceptAttribute): string => `${a.name} ${a.valueType}`;
+
+/** Band classifier for the semantic-model layer: datasets above metrics. */
+const semanticBandOf = (n: Node): number => (n.type === 'metric' ? 1 : 0);
+/** Band classifier for the ontology layer: concepts above mapped-datasets / ghosts. */
+const ontologyBandOf = (n: Node): number =>
+  n.type === 'concept' && !(n.data as { referenced?: boolean } | undefined)?.referenced ? 0 : 1;
+/** Band classifier for the unified layer: concepts (+ ghosts) above datasets above metrics. */
+const unifiedBandOf = (n: Node): number =>
+  n.type === 'concept' ? 0 : n.type === 'metric' ? 2 : 1;
+
+/** Build layout boxes from the nodes' real measured sizes (falls back to any known size). */
+function measuredBoxes(nodes: Node[], bandOf: (n: Node) => number): LayoutBox[] {
+  return nodes.map((n) => ({
+    id: n.id,
+    width: n.measured?.width ?? n.width ?? 200,
+    height: n.measured?.height ?? n.height ?? 80,
+    band: bandOf(n),
+  }));
+}
+
+/** The two domains a node can belong to, each drawn as a labelled background region. */
+type Domain = 'ontology' | 'semantic';
+
+/** Which domain region a node belongs to. Concepts (incl. ghosts) are ontology; everything else semantic. */
+const domainOf = (type: string | undefined): Domain =>
+  type === 'concept' ? 'ontology' : 'semantic';
+
+/** Label + colour for each domain's region box, keyed to the concept/dataset accents. */
+const REGION_META: Record<Domain, { label: string; color: string }> = {
+  ontology: { label: 'Ontology', color: '#2b56d4' },
+  semantic: { label: 'Semantic model', color: '#0d9488' },
+};
+
+/**
+ * Background region boxes: one tinted, labelled rectangle enclosing each domain's
+ * nodes (Ontology = cobalt, Semantic model = teal). Subscribes to the live measured
+ * node bounds via `useStore` so the boxes track drags and re-arranges, and renders
+ * inside `<ViewportPortal>` so they pan/zoom with the canvas, behind the nodes.
+ */
+function BandRegions() {
+  const rects = useStore(regionSelector, regionsEqual);
+  if (rects.length === 0) return null;
+  return (
+    <ViewportPortal>
+      {rects.map((r) => {
+        const meta = REGION_META[r.domain as Domain] ?? REGION_META.semantic;
+        return (
+          <div
+            key={r.domain}
+            style={{
+              position: 'absolute',
+              transform: `translate(${r.x}px, ${r.y}px)`,
+              width: r.width,
+              height: r.height,
+              // Behind the nodes and edges; never intercepts pointer events.
+              zIndex: -1,
+              pointerEvents: 'none',
+              borderRadius: 16,
+              border: `1px solid ${meta.color}59`,
+              background: `${meta.color}0f`,
+            }}
+          >
+            <span
+              style={{
+                position: 'absolute',
+                top: 6,
+                left: 14,
+                fontSize: 11,
+                fontWeight: 700,
+                letterSpacing: '0.08em',
+                textTransform: 'uppercase',
+                color: meta.color,
+              }}
+            >
+              {meta.label}
+            </span>
+          </div>
+        );
+      })}
+    </ViewportPortal>
+  );
+}
+
+/** Derive region rectangles from the store's measured node bounds. */
+function regionSelector(state: ReactFlowState): RegionRect[] {
+  const bounds: DomainNodeBounds[] = [];
+  state.nodeLookup.forEach((n) => {
+    const width = n.measured?.width ?? 0;
+    const height = n.measured?.height ?? 0;
+    bounds.push({
+      domain: domainOf(n.type),
+      x: n.internals.positionAbsolute.x,
+      y: n.internals.positionAbsolute.y,
+      width,
+      height,
+    });
+  });
+  return computeRegionRects(bounds);
+}
+
+/** Value-equality for the region-rect list so `useStore` only re-renders on real geometry changes. */
+function regionsEqual(a: RegionRect[], b: RegionRect[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((r, i) => {
+    const o = b[i]!;
+    return (
+      r.domain === o.domain &&
+      r.x === o.x &&
+      r.y === o.y &&
+      r.width === o.width &&
+      r.height === o.height
+    );
+  });
+}
+
+/**
+ * In-canvas "Arrange" control. Lives inside `<ReactFlow>` so it can read each
+ * node's real *measured* size and repack them into non-overlapping bands — the
+ * reliable fix the estimated initial layout can only approximate. Also runs the
+ * arrange once, automatically, the first time a layer's nodes are measured; after
+ * that it never overrides the user's positions (tracked per layer via
+ * `arrangedLayers`) — the button re-runs it on demand.
+ */
+function ArrangeControl({
+  bandOf,
+  setNodes,
+  layerKey,
+  arrangedLayers,
+}: {
+  bandOf: (n: Node) => number;
+  setNodes: Dispatch<SetStateAction<Node[]>>;
+  layerKey: string;
+  arrangedLayers: RefObject<Set<string>>;
+}) {
+  const { getNodes, fitView } = useReactFlow();
+  const nodesInitialized = useNodesInitialized();
+
+  const arrange = useCallback(() => {
+    const positions = arrangeBoxes(measuredBoxes(getNodes(), bandOf));
+    if (positions.size === 0) return;
+    setNodes((prev) =>
+      prev.map((n) => {
+        const pos = positions.get(n.id);
+        return pos ? { ...n, position: pos } : n;
+      }),
+    );
+    // Reframe after the DOM settles so the freshly arranged graph is in view.
+    requestAnimationFrame(() => fitView({ duration: 200 }));
+  }, [getNodes, bandOf, setNodes, fitView]);
+
+  useEffect(() => {
+    if (!nodesInitialized || arrangedLayers.current.has(layerKey)) return;
+    if (getNodes().length === 0) return;
+    arrangedLayers.current.add(layerKey);
+    arrange();
+  }, [nodesInitialized, layerKey, arrangedLayers, getNodes, arrange]);
+
+  return (
+    <Panel position="top-right">
+      <PButton type="button" compact icon="none" variant="secondary" onClick={arrange}>
+        Arrange
+      </PButton>
+    </Panel>
+  );
+}
 
 /**
  * Ghost nodes for concepts that relationships reference but the document does not
@@ -48,6 +253,7 @@ const noop = () => {};
 function referencedConceptNodes(
   referenced: Set<string>,
   positions: Map<string, Node['position']>,
+  computed: Map<string, Node['position']>,
   startIndex: number,
 ): Node[] {
   return [...referenced].map((name, i) => {
@@ -55,7 +261,7 @@ function referencedConceptNodes(
     return {
       id,
       type: 'concept',
-      position: positions.get(id) ?? gridPosition(startIndex + i),
+      position: positions.get(id) ?? computed.get(id) ?? gridPosition(startIndex + i),
       selectable: false,
       data: {
         label: name,
@@ -86,6 +292,38 @@ export function GraphView() {
   const select = useEditorStore((s) => s.select);
   const addRelationship = useEditorStore((s) => s.addRelationship);
   const addOntologyRelationship = useEditorStore((s) => s.addOntologyRelationship);
+  // Bumped only on new-document load/create (not edits). Used to re-enable the
+  // one-shot measured auto-arrange for a freshly loaded doc's nodes.
+  const docLoadId = useEditorStore((s) => s.docLoadId);
+
+  // Expand/collapse state shared by concept and dataset nodes across all layers.
+  // Tracking *collapsed* (not expanded) makes nodes default to expanded with no
+  // seeding. Keyed by stable node id (`concept:<name>` / `dataset:<name>`) so the
+  // set survives model reconciliation and view switches, like dragged positions.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  // Layers whose nodes have already been auto-arranged (measured) once. Persists
+  // across layer switches so switching back never re-arranges over the user's
+  // manual positions; the "Arrange" button re-runs it explicitly.
+  const arrangedLayers = useRef<Set<string>>(new Set());
+  // A genuinely new document (load/create) has no user-placed nodes, so let its
+  // nodes auto-arrange once again. Keyed on docLoadId — NOT `doc`, which immer
+  // replaces on every edit (that would clobber drags on each keystroke).
+  useEffect(() => {
+    arrangedLayers.current = new Set();
+  }, [docLoadId]);
+  const toggleExpand = useCallback((id: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+  const selectField = useCallback(
+    (field: FieldRow) =>
+      select({ kind: 'field', datasetIndex: field.datasetIndex, fieldIndex: field.fieldIndex }),
+    [select],
+  );
 
   const isOnt = isOntologyDoc(doc);
   const model = getActiveModel(doc, activeModelIndex, activeMapIndex);
@@ -100,24 +338,69 @@ export function GraphView() {
   // ---- semantic-model layer (unchanged from the ERD view) ----
   const [nodes, setNodes] = useState<Node[]>([]);
 
-  // Reconcile nodes from datasets, preserving user-dragged positions by name.
+  // Reconcile nodes from datasets (with field rows) plus metric nodes, preserving
+  // user-dragged positions by id. Dataset expand state is keyed by `datasetNodeId`
+  // so it persists across reconciliation and layer switches, like dragged positions.
   useEffect(() => {
     if (!model) {
       setNodes([]);
       return;
     }
     setNodes((prev) => {
+      const positions = new Map(prev.map((n) => [n.id, n.position]));
       const selectedDatasetName =
         selection?.kind === 'dataset' ? model.datasets[selection.datasetIndex]?.name : undefined;
-      const positionFor = reconcilePositions(prev);
-      return model.datasets.map((dataset, index) => ({
-        id: dataset.name,
-        position: positionFor(dataset.name, index),
-        data: { label: dataset.name },
-        selected: dataset.name === selectedDatasetName,
-      }));
+      const fieldsById = datasetFieldsById(model);
+      const metricRows = buildMetricRows(model);
+      // Size-aware bands: datasets (sized by their expanded field rows) above a
+      // metric band. Only supplies positions for ids without a remembered one; the
+      // measured "Arrange" action tightens this once real node sizes are known.
+      const computed = layoutEstimatedBands([
+        model.datasets.map((dataset): EstimatedItem => {
+          const fields = fieldsById.get(dataset.name) ?? [];
+          const expanded = !collapsed.has(datasetNodeId(dataset.name));
+          return {
+            id: dataset.name,
+            rows: (expanded ? fields.length : 0) + (dataset.description ? 2 : 0),
+            texts: [dataset.name, dataset.description ?? '', ...(expanded ? fields.map(fieldRowText) : [])],
+          };
+        }),
+        metricRows.map((metric): EstimatedItem => ({
+          id: metricNodeId(metric.name),
+          rows: metric.description ? 2 : 0,
+          texts: [metric.name],
+        })),
+      ]);
+      const datasetNodes: Node[] = model.datasets.map((dataset, index) => {
+        const expandKey = datasetNodeId(dataset.name);
+        return {
+          id: dataset.name,
+          type: 'dataset',
+          position: positions.get(dataset.name) ?? computed.get(dataset.name) ?? gridPosition(index),
+          data: {
+            label: dataset.name,
+            description: dataset.description,
+            fields: fieldsById.get(dataset.name) ?? [],
+            expanded: !collapsed.has(expandKey),
+            onToggleExpand: () => toggleExpand(expandKey),
+            onSelectField: selectField,
+          },
+          selected: dataset.name === selectedDatasetName,
+        };
+      });
+      const metricNodes: Node[] = metricRows.map((metric, index) => {
+        const id = metricNodeId(metric.name);
+        return {
+          id,
+          type: 'metric',
+          position: positions.get(id) ?? computed.get(id) ?? gridPosition(index),
+          data: { metric },
+          selected: selection?.kind === 'metric' && selection.metricIndex === metric.metricIndex,
+        };
+      });
+      return [...datasetNodes, ...metricNodes];
     });
-  }, [model, selection]);
+  }, [model, selection, collapsed, toggleExpand, selectField]);
 
   const edges = useMemo<Edge[]>(
     () => (model ? buildSemanticEdges(model, selection) : []),
@@ -140,6 +423,12 @@ export function GraphView() {
 
   const onNodeClick = useCallback(
     (_: unknown, node: Node) => {
+      if (node.id.startsWith('metric:')) {
+        const name = node.id.slice('metric:'.length);
+        const metricIndex = model?.metrics?.findIndex((m) => m.name === name) ?? -1;
+        if (metricIndex >= 0) select({ kind: 'metric', metricIndex });
+        return;
+      }
       const datasetIndex = model?.datasets.findIndex((d) => d.name === node.id) ?? -1;
       if (datasetIndex >= 0) select({ kind: 'dataset', datasetIndex });
     },
@@ -156,19 +445,6 @@ export function GraphView() {
 
   // ---- ontology layer ----
   const [ontNodes, setOntNodes] = useState<Node[]>([]);
-  // Collapsed concept node ids. Tracking *collapsed* (not expanded) makes concepts
-  // default to expanded with no seeding. Keyed by stable `concept:<name>` id so the
-  // set survives model reconciliation and view switches, like dragged positions.
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
-
-  const toggleExpand = useCallback((id: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }, []);
 
   const selectAttribute = useCallback(
     (attr: ConceptAttribute) => {
@@ -204,6 +480,39 @@ export function GraphView() {
     }
     setOntNodes((prev) => {
       const positions = new Map(prev.map((n) => [n.id, n.position]));
+      const known = conceptNames(components);
+      const mappedNames = showMappings
+        ? buildMappingLinks(doc, activeMapIndex, known).datasetNames
+        : [];
+      // Concepts (sized by their attribute rows) form the top band; mapped
+      // datasets and ghost concepts sit in a band below, clear of the concepts.
+      const computed = layoutEstimatedBands([
+        components.map((comp, index): EstimatedItem => {
+          const name = comp?.concept?.name ?? `concept_${index + 1}`;
+          const id = conceptNodeId(name);
+          const type = comp?.concept?.type;
+          const description = comp?.concept?.description ?? comp?.description;
+          const attrs = ontModel.attributesByConceptId.get(id) ?? [];
+          const expanded = !collapsed.has(id);
+          return {
+            id,
+            rows: (expanded ? attrs.length : 0) + (description ? 2 : 0),
+            texts: [
+              type ? `${name} (${type})` : name,
+              description ?? '',
+              ...(expanded ? attrs.map(attrRowText) : []),
+            ],
+          };
+        }),
+        [
+          ...mappedNames.map((n): EstimatedItem => ({ id: datasetNodeId(n), texts: [n] })),
+          ...[...ontModel.referencedConcepts].map((n): EstimatedItem => ({
+            id: conceptNodeId(n),
+            texts: [n],
+          })),
+        ],
+      ]);
+
       const nextNodes: Node[] = components.map((comp, index) => {
         const name = comp?.concept?.name ?? `concept_${index + 1}`;
         const id = conceptNodeId(name);
@@ -211,9 +520,10 @@ export function GraphView() {
         return {
           id,
           type: 'concept',
-          position: positions.get(id) ?? gridPosition(index),
+          position: positions.get(id) ?? computed.get(id) ?? gridPosition(index),
           data: {
             label: type ? `${name} (${type})` : name,
+            description: comp?.concept?.description ?? comp?.description,
             attributes: ontModel.attributesByConceptId.get(id) ?? [],
             expanded: !collapsed.has(id),
             onToggleExpand: () => toggleExpand(id),
@@ -223,27 +533,23 @@ export function GraphView() {
         };
       });
       let extraIndex = components.length;
-      if (showMappings) {
-        const known = conceptNames(components);
-        const { datasetNames } = buildMappingLinks(doc, activeMapIndex, known);
-        datasetNames.forEach((dsName, i) => {
-          const id = datasetNodeId(dsName);
-          nextNodes.push({
-            id,
-            position: positions.get(id) ?? gridPosition(components.length + i),
-            data: { label: dsName },
-            className: 'osi-mapped-dataset-node',
-            style: {
-              border: '1px dashed var(--p-color-border, #999)',
-              borderRadius: 6,
-              opacity: 0.85,
-            },
-          });
+      mappedNames.forEach((dsName, i) => {
+        const id = datasetNodeId(dsName);
+        nextNodes.push({
+          id,
+          position: positions.get(id) ?? computed.get(id) ?? gridPosition(components.length + i),
+          data: { label: dsName },
+          className: 'osi-mapped-dataset-node',
+          style: {
+            border: '1px dashed var(--p-color-border, #999)',
+            borderRadius: 6,
+            opacity: 0.85,
+          },
         });
-        extraIndex += datasetNames.length;
-      }
+      });
+      extraIndex += mappedNames.length;
       nextNodes.push(
-        ...referencedConceptNodes(ontModel.referencedConcepts, positions, extraIndex),
+        ...referencedConceptNodes(ontModel.referencedConcepts, positions, computed, extraIndex),
       );
       return nextNodes;
     });
@@ -336,6 +642,60 @@ export function GraphView() {
       const { datasetNames } = buildMappingLinks(doc, activeMapIndex, known);
       const mapped = new Set(datasetNames);
 
+      const fieldsById = model
+        ? datasetFieldsById(model, datasetNodeId)
+        : new Map<string, FieldRow[]>();
+      const metricRows = buildMetricRows(model ?? { metrics: [] });
+
+      // Three flexing bands: concepts (+ ghost concepts) above datasets above
+      // metrics, each band shelf-packed by node size so a tall/wide node in one
+      // band never overlaps an adjacent band. Only fills ids without a remembered
+      // position; the measured "Arrange" action tightens it with real sizes.
+      const computed = layoutEstimatedBands([
+        [
+          ...components.map((comp, index): EstimatedItem => {
+            const name = comp?.concept?.name ?? `concept_${index + 1}`;
+            const id = conceptNodeId(name);
+            const type = comp?.concept?.type;
+            const description = comp?.concept?.description ?? comp?.description;
+            const attrs = ontModel.attributesByConceptId.get(id) ?? [];
+            const expanded = !collapsed.has(id);
+            return {
+              id,
+              rows: (expanded ? attrs.length : 0) + (description ? 2 : 0),
+              texts: [
+                type ? `${name} (${type})` : name,
+                description ?? '',
+                ...(expanded ? attrs.map(attrRowText) : []),
+              ],
+            };
+          }),
+          ...[...ontModel.referencedConcepts].map((n): EstimatedItem => ({
+            id: conceptNodeId(n),
+            texts: [n],
+          })),
+        ],
+        (model?.datasets ?? []).map((dataset): EstimatedItem => {
+          const id = datasetNodeId(dataset.name);
+          const fields = fieldsById.get(id) ?? [];
+          const expanded = !collapsed.has(id);
+          return {
+            id,
+            rows: (expanded ? fields.length : 0) + (dataset.description ? 2 : 0),
+            texts: [
+              dataset.name,
+              dataset.description ?? '',
+              ...(expanded ? fields.map(fieldRowText) : []),
+            ],
+          };
+        }),
+        metricRows.map((metric): EstimatedItem => ({
+          id: metricNodeId(metric.name),
+          rows: metric.description ? 2 : 0,
+          texts: [metric.name],
+        })),
+      ]);
+
       const conceptNodes: Node[] = components.map((comp, index) => {
         const name = comp?.concept?.name ?? `concept_${index + 1}`;
         const id = conceptNodeId(name);
@@ -343,9 +703,10 @@ export function GraphView() {
         return {
           id,
           type: 'concept',
-          position: positions.get(id) ?? gridPosition(index),
+          position: positions.get(id) ?? computed.get(id) ?? gridPosition(index),
           data: {
             label: type ? `${name} (${type})` : name,
+            description: comp?.concept?.description ?? comp?.description,
             attributes: ontModel.attributesByConceptId.get(id) ?? [],
             expanded: !collapsed.has(id),
             onToggleExpand: () => toggleExpand(id),
@@ -361,26 +722,44 @@ export function GraphView() {
         const id = datasetNodeId(dataset.name);
         return {
           id,
-          position: positions.get(id) ?? datasetLanePosition(index),
-          data: { label: dataset.name },
-          selected: dataset.name === selectedDatasetName,
-          style: {
-            border: mapped.has(dataset.name)
-              ? '1.5px solid var(--p-color-state-focus, #6d3ad6)'
-              : '1px solid var(--color-border, #ccc)',
-            borderRadius: 8,
-            background: 'var(--color-surface, #fff)',
+          type: 'dataset',
+          position: positions.get(id) ?? computed.get(id) ?? gridPosition(index),
+          data: {
+            label: dataset.name,
+            description: dataset.description,
+            fields: fieldsById.get(id) ?? [],
+            expanded: !collapsed.has(id),
+            onToggleExpand: () => toggleExpand(id),
+            onSelectField: selectField,
           },
+          selected: dataset.name === selectedDatasetName,
+          // Ring (outline, not border) marks a dataset that a concept maps to,
+          // without conflicting with the custom node's own border.
+          style: mapped.has(dataset.name)
+            ? { outline: '2px solid var(--p-color-state-focus, #6d3ad6)', borderRadius: 8 }
+            : undefined,
+        };
+      });
+
+      const metricNodes: Node[] = metricRows.map((metric, index) => {
+        const id = metricNodeId(metric.name);
+        return {
+          id,
+          type: 'metric',
+          position: positions.get(id) ?? computed.get(id) ?? gridPosition(index),
+          data: { metric },
+          selected: selection?.kind === 'metric' && selection.metricIndex === metric.metricIndex,
         };
       });
 
       const ghostNodes = referencedConceptNodes(
         ontModel.referencedConcepts,
         positions,
+        computed,
         components.length,
       );
 
-      return [...conceptNodes, ...ghostNodes, ...datasetNodes];
+      return [...conceptNodes, ...ghostNodes, ...datasetNodes, ...metricNodes];
     });
   }, [
     isOnt,
@@ -393,6 +772,7 @@ export function GraphView() {
     collapsed,
     toggleExpand,
     selectAttribute,
+    selectField,
   ]);
 
   // All three connection kinds at once, visually distinct: ontology relationships
@@ -456,6 +836,10 @@ export function GraphView() {
         const name = node.id.slice('dataset:'.length);
         const datasetIndex = model?.datasets.findIndex((d) => d.name === name) ?? -1;
         if (datasetIndex >= 0) select({ kind: 'dataset', datasetIndex });
+      } else if (node.id.startsWith('metric:')) {
+        const name = node.id.slice('metric:'.length);
+        const metricIndex = model?.metrics?.findIndex((m) => m.name === name) ?? -1;
+        if (metricIndex >= 0) select({ kind: 'metric', metricIndex });
       }
     },
     [components, model, select],
@@ -479,9 +863,15 @@ export function GraphView() {
   );
 
   const semanticFlow = (
+    // `key` forces a remount per layer so returning to a visited layer re-fits the
+    // viewport (the fitView-on-init prop only fires on mount); node positions live
+    // in parent state keyed by id, so they survive the remount.
     <ReactFlow
+      key="semantic"
       nodes={nodes}
       edges={edges}
+      nodeTypes={semanticNodeTypes}
+      defaultEdgeOptions={smoothEdges}
       onNodesChange={onNodesChange}
       onConnect={onConnect}
       onNodeClick={onNodeClick}
@@ -490,6 +880,13 @@ export function GraphView() {
     >
       <Background />
       <Controls />
+      <BandRegions />
+      <ArrangeControl
+        bandOf={semanticBandOf}
+        setNodes={setNodes}
+        layerKey="semantic"
+        arrangedLayers={arrangedLayers}
+      />
     </ReactFlow>
   );
 
@@ -512,9 +909,11 @@ export function GraphView() {
 
   const ontologyFlow = (
     <ReactFlow
+      key="ontology"
       nodes={ontNodes}
       edges={ontEdges}
       nodeTypes={ontologyNodeTypes}
+      defaultEdgeOptions={smoothEdges}
       onNodesChange={onOntNodesChange}
       onConnect={onOntConnect}
       onNodeClick={onOntNodeClick}
@@ -523,14 +922,23 @@ export function GraphView() {
     >
       <Background />
       <Controls />
+      <BandRegions />
+      <ArrangeControl
+        bandOf={ontologyBandOf}
+        setNodes={setOntNodes}
+        layerKey="ontology"
+        arrangedLayers={arrangedLayers}
+      />
     </ReactFlow>
   );
 
   const unifiedFlow = (
     <ReactFlow
+      key="unified"
       nodes={unifiedNodes}
       edges={unifiedEdges}
       nodeTypes={ontologyNodeTypes}
+      defaultEdgeOptions={smoothEdges}
       onNodesChange={onUnifiedNodesChange}
       onConnect={onUnifiedConnect}
       onNodeClick={onUnifiedNodeClick}
@@ -539,6 +947,13 @@ export function GraphView() {
     >
       <Background />
       <Controls />
+      <BandRegions />
+      <ArrangeControl
+        bandOf={unifiedBandOf}
+        setNodes={setUnifiedNodes}
+        layerKey="unified"
+        arrangedLayers={arrangedLayers}
+      />
     </ReactFlow>
   );
 

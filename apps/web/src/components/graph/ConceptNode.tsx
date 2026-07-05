@@ -5,6 +5,8 @@ import type { ConceptAttribute } from './ontologyGraph.js';
 /** Data carried by an expandable concept node. */
 export interface ConceptNodeData {
   label: string;
+  /** Concept description, always shown (muted) when present. */
+  description?: string;
   attributes: ConceptAttribute[];
   expanded: boolean;
   /** True for a concept referenced by a relationship but not declared (ghost node). */
@@ -21,7 +23,7 @@ export interface ConceptNodeData {
  * underlying ontology relationship in the detail form.
  */
 export function ConceptNode({ data, selected }: NodeProps) {
-  const { label, attributes, expanded, referenced, onToggleExpand, onSelectAttribute } =
+  const { label, description, attributes, expanded, referenced, onToggleExpand, onSelectAttribute } =
     data as ConceptNodeData;
   const hasAttributes = attributes.length > 0;
 
@@ -39,8 +41,9 @@ export function ConceptNode({ data, selected }: NodeProps) {
 
   return (
     <div
-      className={`min-w-40 rounded border bg-surface text-content shadow-sm ${
-        selected ? 'border-brand' : 'border-border'
+      // Cobalt left accent keys concepts to their ontology-relationship edges.
+      className={`min-w-40 rounded border border-l-4 bg-surface text-content shadow-sm ${
+        selected ? 'border-brand' : 'border-border border-l-[#2b56d4]'
       }`}
     >
       <Handle type="target" position={Position.Left} />
@@ -63,6 +66,11 @@ export function ConceptNode({ data, selected }: NodeProps) {
           </button>
         )}
       </div>
+      {description && (
+        <div className="border-t border-border px-3 py-1.5 text-xs italic text-content/60">
+          {description}
+        </div>
+      )}
       {expanded && hasAttributes && (
         <ul className="border-t border-border">
           {attributes.map((attr) => (

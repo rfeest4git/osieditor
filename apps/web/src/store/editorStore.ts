@@ -51,6 +51,13 @@ interface EditorState {
   dirty: boolean;
   fileName: string | null;
   previewFormat: OsiFormat;
+  /**
+   * Monotonic counter bumped only when a *new* document is loaded/created (not on
+   * edits). Views key one-shot layout work off this so a freshly loaded document
+   * re-arranges, while ordinary edits (which produce a new immer `doc` reference
+   * every keystroke) do not. See {@link GraphView}'s auto-arrange reset.
+   */
+  docLoadId: number;
 
   // ---- lifecycle ----
   newModel: (name?: string) => void;
@@ -216,6 +223,7 @@ export const useEditorStore = create<EditorState>()(
       dirty: false,
       fileName: null,
       previewFormat: 'yaml',
+      docLoadId: 0,
 
       newModel: (name = 'untitled_model') =>
         set((state) => {
@@ -226,6 +234,7 @@ export const useEditorStore = create<EditorState>()(
           state.selection = { kind: 'model' };
           state.dirty = false;
           state.fileName = null;
+          state.docLoadId += 1;
         }),
 
       newOntology: (name = 'untitled_ontology') =>
@@ -237,6 +246,7 @@ export const useEditorStore = create<EditorState>()(
           state.selection = { kind: 'ontology' };
           state.dirty = false;
           state.fileName = null;
+          state.docLoadId += 1;
         }),
 
       loadDocument: (doc, fileName) =>
@@ -249,6 +259,7 @@ export const useEditorStore = create<EditorState>()(
           state.selection = kind === 'ontology' ? { kind: 'ontology' } : { kind: 'model' };
           state.dirty = false;
           state.fileName = fileName ?? null;
+          state.docLoadId += 1;
         }),
 
       markSaved: () =>

@@ -12,9 +12,233 @@ export function datasetNodeId(name: string): string {
   return `dataset:${name}`;
 }
 
-/** Simple grid layout used for initial node placement (mirrors the ERD view). */
-export function gridPosition(index: number): { x: number; y: number } {
-  return { x: (index % 4) * 240 + 40, y: Math.floor(index / 4) * 160 + 40 };
+/** Stable React Flow node id for a metric node. */
+export function metricNodeId(name: string): string {
+  return `metric:${name}`;
+}
+
+/** Top-left origin of the first node. */
+const LAYOUT_ORIGIN = 40;
+/** Horizontal gap left between two nodes on the same shelf row. */
+const H_GUTTER = 64;
+/** Vertical gap left between two shelf rows within a band. */
+const V_GUTTER = 72;
+/**
+ * Vertical gap between two adjacent bands (concept / dataset / metric). Generous
+ * so cross-band connection edges have room to route without crossing nodes.
+ */
+const BAND_GUTTER = 220;
+/** Target width a shelf row fills before wrapping to the next row. */
+const DEFAULT_ROW_WIDTH = 1600;
+
+/** Header height of a node with no expanded rows (matches the node components). */
+const NODE_HEADER_HEIGHT = 46;
+/** Height contributed by each expanded field/attribute row (biased high). */
+const NODE_ROW_HEIGHT = 28;
+/** Approx. rendered width of one character in the node's label/row font. */
+const CHAR_WIDTH = 7.3;
+/** Horizontal padding + affordances added around a node's widest text. */
+const NODE_H_PADDING = 48;
+/** Clamp for the estimated node width (real nodes truncate very long text). */
+const NODE_MIN_WIDTH = 180;
+const NODE_MAX_WIDTH = 480;
+
+/**
+ * Estimate a node's rendered height from its expanded row count. Deliberately
+ * biased high so drift from the real DOM height never produces an overlap on the
+ * initial (pre-measurement) layout. Not capped — a 50-field node really is tall,
+ * and clamping its height is exactly what caused the old layout to overlap.
+ */
+export function estimateNodeHeight(rows = 0): number {
+  return NODE_HEADER_HEIGHT + Math.max(0, rows) * NODE_ROW_HEIGHT;
+}
+
+/**
+ * Estimate a node's rendered width from its widest piece of text (label or a
+ * field/attribute row). Clamped to a sane range because real nodes have a min
+ * width and truncate very long labels. Biased high, like {@link estimateNodeHeight}.
+ */
+export function estimateNodeWidth(texts: string[]): number {
+  const longest = texts.reduce((max, t) => Math.max(max, t?.length ?? 0), 0);
+  const raw = Math.ceil(longest * CHAR_WIDTH) + NODE_H_PADDING;
+  return Math.min(NODE_MAX_WIDTH, Math.max(NODE_MIN_WIDTH, raw));
+}
+
+/** A box to place: a stable id, its size, and which band (row-group) it belongs to. */
+export interface LayoutBox {
+  id: string;
+  width: number;
+  height: number;
+  /** Band index; lower bands are placed above higher ones. */
+  band: number;
+}
+
+/** Tunables for {@link arrangeBoxes}. */
+export interface ArrangeOptions {
+  originX?: number;
+  originY?: number;
+  hGutter?: number;
+  vGutter?: number;
+  bandGutter?: number;
+  /** Width a shelf row fills before wrapping. Falls back to {@link DEFAULT_ROW_WIDTH}. */
+  maxRowWidth?: number;
+}
+
+/**
+ * Shelf-pack boxes into non-overlapping positions, grouped into vertically
+ * stacked bands. Within a band, boxes are laid left-to-right until the row width
+ * budget is exceeded, then wrap to a new shelf row whose y clears the tallest box
+ * of the previous row. The next band starts below the previous band's bottom.
+ *
+ * Guarantees no two boxes overlap for ANY mix of widths/heights: same-row boxes
+ * are separated horizontally by their real width + gutter, rows by the row's max
+ * height + gutter, and bands by a band gutter. Input order within a band is kept.
+ *
+ * Works identically for estimated sizes (initial layout) and real measured sizes
+ * (the manual "Arrange" action) — only the width/height source differs.
+ */
+export function arrangeBoxes(boxes: LayoutBox[], options: ArrangeOptions = {}): Map<string, XYPosition> {
+  const originX = options.originX ?? LAYOUT_ORIGIN;
+  const hGutter = options.hGutter ?? H_GUTTER;
+  const vGutter = options.vGutter ?? V_GUTTER;
+  const bandGutter = options.bandGutter ?? BAND_GUTTER;
+  const widest = boxes.reduce((max, b) => Math.max(max, b.width), 0);
+  // Never let the budget be narrower than the widest box, or it could never fit.
+  const maxRowWidth = Math.max(options.maxRowWidth ?? DEFAULT_ROW_WIDTH, widest);
+
+  const positions = new Map<string, XYPosition>();
+  const bands = [...new Set(boxes.map((b) => b.band))].sort((a, b) => a - b);
+  let originY = options.originY ?? LAYOUT_ORIGIN;
+
+  for (const band of bands) {
+    const items = boxes.filter((b) => b.band === band);
+    let x = originX;
+    let rowY = originY;
+    let rowMaxHeight = 0;
+    for (const item of items) {
+      // Wrap when the box would spill past the row budget — but never wrap a box
+      // that is alone at the row start (it simply gets its own over-wide row).
+      if (x > originX && x + item.width > originX + maxRowWidth) {
+        rowY += rowMaxHeight + vGutter;
+        x = originX;
+        rowMaxHeight = 0;
+      }
+      positions.set(item.id, { x, y: rowY });
+      x += item.width + hGutter;
+      rowMaxHeight = Math.max(rowMaxHeight, item.height);
+    }
+    if (items.length > 0) originY = rowY + rowMaxHeight + bandGutter;
+  }
+  return positions;
+}
+
+/** An item to lay out with estimated (pre-measurement) sizing. */
+export interface EstimatedItem {
+  id: string;
+  /** Expanded field/attribute rows → estimated height. 0 for a bare/collapsed node. */
+  rows?: number;
+  /** Label + row texts → estimated width. */
+  texts?: string[];
+}
+
+/**
+ * Estimate box sizes for each item and {@link arrangeBoxes} them into bands (one
+ * band per input array). Used for the initial layout before React Flow has
+ * measured the real node sizes.
+ */
+export function layoutEstimatedBands(
+  bands: EstimatedItem[][],
+  options: ArrangeOptions = {},
+): Map<string, XYPosition> {
+  const boxes: LayoutBox[] = [];
+  bands.forEach((items, band) => {
+    for (const item of items) {
+      boxes.push({
+        id: item.id,
+        width: estimateNodeWidth(item.texts ?? []),
+        height: estimateNodeHeight(item.rows ?? 0),
+        band,
+      });
+    }
+  });
+  return arrangeBoxes(boxes, options);
+}
+
+/** Simple grid layout used as an ultimate fallback for a single index-placed node. */
+export function gridPosition(index: number): XYPosition {
+  return {
+    x: (index % 4) * 280 + LAYOUT_ORIGIN,
+    y: Math.floor(index / 4) * 220 + LAYOUT_ORIGIN,
+  };
+}
+
+/** A positioned, sized node grouped under a domain, for region-box computation. */
+export interface DomainNodeBounds {
+  /** Domain the node belongs to (e.g. `ontology` / `semantic`). */
+  domain: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** A background region box enclosing every node of one domain. */
+export interface RegionRect {
+  domain: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/** Padding around a domain's node cluster on the sides and bottom of its region box. */
+const REGION_PADDING = 32;
+/** Extra top padding inside a region box, leaving room for its label. */
+const REGION_LABEL_SPACE = 24;
+
+/**
+ * Compute one enclosing box per domain from its nodes' bounds. The box is the
+ * union of the domain's node rectangles, expanded by {@link REGION_PADDING} (plus
+ * label space on top). Domains are returned in first-seen order; a domain with no
+ * sized nodes yields no box. Pure — used to render the ontology / semantic-model
+ * background regions from live measured node bounds.
+ */
+export function computeRegionRects(
+  nodes: DomainNodeBounds[],
+  padding = REGION_PADDING,
+  labelSpace = REGION_LABEL_SPACE,
+): RegionRect[] {
+  interface Extent {
+    minX: number;
+    minY: number;
+    maxX: number;
+    maxY: number;
+  }
+  const order: string[] = [];
+  const extents = new Map<string, Extent>();
+  for (const n of nodes) {
+    if (!(n.width > 0) || !(n.height > 0)) continue;
+    const prev = extents.get(n.domain);
+    if (!prev) {
+      order.push(n.domain);
+      extents.set(n.domain, { minX: n.x, minY: n.y, maxX: n.x + n.width, maxY: n.y + n.height });
+    } else {
+      prev.minX = Math.min(prev.minX, n.x);
+      prev.minY = Math.min(prev.minY, n.y);
+      prev.maxX = Math.max(prev.maxX, n.x + n.width);
+      prev.maxY = Math.max(prev.maxY, n.y + n.height);
+    }
+  }
+  return order.map((domain) => {
+    const e = extents.get(domain)!;
+    return {
+      domain,
+      x: e.minX - padding,
+      y: e.minY - padding - labelSpace,
+      width: e.maxX - e.minX + padding * 2,
+      height: e.maxY - e.minY + padding * 2 + labelSpace,
+    };
+  });
 }
 
 /**
@@ -29,19 +253,70 @@ export function reconcilePositions(
   return (id, index) => positions.get(id) ?? gridPosition(index);
 }
 
-/**
- * Bottom-lane grid layout for dataset nodes in the unified view, so datasets sit
- * below the ontology concepts (which use {@link gridPosition}).
- */
-export function datasetLanePosition(index: number): XYPosition {
-  const base = gridPosition(index);
-  return { x: base.x, y: base.y + 420 };
-}
-
 /** Minimal shape of a semantic model needed to derive ERD edges. */
 export interface SemanticModelLike {
   datasets: Array<{ name: string }>;
   relationships?: Array<{ from: string; to: string; name?: string }>;
+}
+
+/** A field row shown inside a dataset node's expandable list. */
+export interface FieldRow {
+  /** Field name. */
+  name: string;
+  /** Optional secondary detail (the field label, or `time` for a time dimension). */
+  detail?: string;
+  /** Index of the owning dataset in `model.datasets`. */
+  datasetIndex: number;
+  /** Index of the field within the dataset. */
+  fieldIndex: number;
+}
+
+/** Minimal shape of a dataset needed to derive its field rows. */
+interface DatasetLike {
+  name: string;
+  fields?: Array<{ name: string; label?: string; dimension?: { is_time?: boolean } }>;
+}
+
+/**
+ * Derive each dataset's field rows keyed by its React Flow node id. `nodeId`
+ * defaults to the raw dataset name (semantic-model layer) and is overridden to
+ * {@link datasetNodeId} on the unified canvas, mirroring {@link buildSemanticEdges}.
+ * A dataset with no fields maps to an empty array.
+ */
+export function datasetFieldsById(
+  model: { datasets: DatasetLike[] },
+  nodeId: (name: string) => string = (name) => name,
+): Map<string, FieldRow[]> {
+  const map = new Map<string, FieldRow[]>();
+  model.datasets.forEach((dataset, datasetIndex) => {
+    const rows: FieldRow[] = (dataset.fields ?? []).map((field, fieldIndex) => ({
+      name: field.name,
+      detail: field.label ?? (field.dimension?.is_time ? 'time' : undefined),
+      datasetIndex,
+      fieldIndex,
+    }));
+    map.set(nodeId(dataset.name), rows);
+  });
+  return map;
+}
+
+/** A metric row backing a metric node. */
+export interface MetricRow {
+  name: string;
+  description?: string;
+  /** Index of the metric within `model.metrics`. */
+  metricIndex: number;
+}
+
+/** Derive metric rows (name + description) from a semantic model. */
+export function buildMetricRows(model: {
+  metrics?: Array<{ name: string; description?: string }>;
+}): MetricRow[] {
+  return (model.metrics ?? []).map((metric, metricIndex) => ({
+    name: metric.name,
+    description: metric.description,
+    metricIndex,
+  }));
 }
 
 /**
