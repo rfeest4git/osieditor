@@ -1,7 +1,4 @@
-## Purpose
-Visualize the OSI ontology as a graph of concepts and relationships, distinct from the dataset ERD, with support for drag-to-connect relationships and viewing concept-to-dataset mapping links.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Render the ontology in the graph
 
@@ -31,52 +28,7 @@ SHALL indicate their multiplicity and, when present, display or expose their ver
 - **WHEN** a document has no concepts
 - **THEN** the ontology graph shows an empty state rather than an error
 
-### Requirement: Distinguish ontology and semantic-model views
-
-The graph SHALL let the user view the ontology layer separately from the existing dataset
-ERD, so the two layers do not visually collide.
-
-#### Scenario: Toggle between layers
-
-- **WHEN** the user switches the graph between the semantic-model view and the ontology
-  view
-- **THEN** the graph shows the selected layer's nodes and edges
-
-### Requirement: Drag-to-connect ontology relationships
-
-The graph SHALL support creating an ontology Relationship by dragging a connection between
-two Concept nodes, consistent with the existing dataset drag-to-connect behavior.
-
-#### Scenario: Create a relationship by dragging
-
-- **WHEN** the user drags a connection from one concept node to another
-- **THEN** a new ontology relationship is created between those concepts and opens for
-  editing
-
-### Requirement: Show mapping links to datasets
-
-The graph SHALL make it possible to see which semantic_model datasets a concept is mapped
-to via its concept mappings.
-
-#### Scenario: Concept mapped to a dataset
-
-- **WHEN** a concept has a mapping bound to a dataset
-- **THEN** the graph conveys the link between the concept and that dataset
-
-### Requirement: Add-toolbar actions are contextual to the active layer
-In the ontology and unified layers, the graph's add toolbar SHALL additionally expose adding a concept, and SHALL expose the nested semantic model's add actions (dataset, metric), so the user can grow either layer without leaving the graph. The toolbar SHALL show the actions relevant to the layer currently displayed.
-
-#### Scenario: Add a concept from the ontology layer
-- **WHEN** the ontology or unified layer is active and the user activates "Add concept"
-- **THEN** a new concept is created, appears as a concept node, and is selected with its detail form open
-
-#### Scenario: Layer-specific actions
-- **WHEN** the user switches between the semantic-model, ontology, and unified layers
-- **THEN** the toolbar shows the add actions relevant to that layer (concept actions in the ontology/unified layers; dataset/metric/relationship actions where a semantic model is present)
-
-#### Scenario: Toolbar available on a non-empty ontology graph
-- **WHEN** the ontology graph already contains at least one concept
-- **THEN** the add toolbar remains visible so further concepts can be added without returning to the Navigator
+## ADDED Requirements
 
 ### Requirement: Unified view links ontology to semantics
 

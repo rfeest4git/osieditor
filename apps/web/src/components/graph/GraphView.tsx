@@ -19,15 +19,55 @@ import {
   useEditorStore,
 } from '../../store/editorStore.js';
 import { SelectionDetail } from '../editor/SelectionDetail.js';
+import { ConceptNode } from './ConceptNode.js';
 import { GraphEmptyState } from './GraphEmptyState.js';
+import { GraphToolbar } from './GraphToolbar.js';
 import {
   buildMappingLinks,
-  buildOntologyEdges,
+  buildOntologyGraphModel,
+  buildSemanticEdges,
   conceptNames,
   conceptNodeId,
+  datasetLanePosition,
   datasetNodeId,
   gridPosition,
+  reconcilePositions,
+  type ConceptAttribute,
 } from './ontologyGraph.js';
+
+/** Custom node types for the ontology layer (expandable concept nodes). */
+const ontologyNodeTypes = { concept: ConceptNode };
+
+const noop = () => {};
+
+/**
+ * Ghost nodes for concepts that relationships reference but the document does not
+ * declare (e.g. `Example_Flight`). Rendered dashed and non-selectable so every
+ * relationship still has a target node to connect to.
+ */
+function referencedConceptNodes(
+  referenced: Set<string>,
+  positions: Map<string, Node['position']>,
+  startIndex: number,
+): Node[] {
+  return [...referenced].map((name, i) => {
+    const id = conceptNodeId(name);
+    return {
+      id,
+      type: 'concept',
+      position: positions.get(id) ?? gridPosition(startIndex + i),
+      selectable: false,
+      data: {
+        label: name,
+        attributes: [],
+        expanded: false,
+        referenced: true,
+        onToggleExpand: noop,
+        onSelectAttribute: noop,
+      },
+    };
+  });
+}
 
 /**
  * ERD-style graph (React Flow): dataset nodes and relationship edges derived
@@ -52,8 +92,8 @@ export function GraphView() {
   const components = getOntologyComponents(doc);
   const diagnostics = useMemo(() => (doc ? validate(doc) : []), [doc]);
 
-  const [layer, setLayer] = useState<'semantic-model' | 'ontology'>(() =>
-    isOnt ? 'ontology' : 'semantic-model',
+  const [layer, setLayer] = useState<'unified' | 'semantic-model' | 'ontology'>(() =>
+    isOnt ? 'unified' : 'semantic-model',
   );
   const [showMappings, setShowMappings] = useState(false);
 
@@ -67,33 +107,22 @@ export function GraphView() {
       return;
     }
     setNodes((prev) => {
-      const positions = new Map(prev.map((n) => [n.id, n.position]));
       const selectedDatasetName =
         selection?.kind === 'dataset' ? model.datasets[selection.datasetIndex]?.name : undefined;
+      const positionFor = reconcilePositions(prev);
       return model.datasets.map((dataset, index) => ({
         id: dataset.name,
-        position: positions.get(dataset.name) ?? gridPosition(index),
+        position: positionFor(dataset.name, index),
         data: { label: dataset.name },
         selected: dataset.name === selectedDatasetName,
       }));
     });
   }, [model, selection]);
 
-  const edges = useMemo<Edge[]>(() => {
-    if (!model) return [];
-    const names = new Set(model.datasets.map((d) => d.name));
-    return (model.relationships ?? [])
-      .map((rel, index) => ({ rel, index }))
-      .filter(({ rel }) => names.has(rel.from) && names.has(rel.to))
-      .map(({ rel, index }) => ({
-        id: `rel-${index}`,
-        source: rel.from,
-        target: rel.to,
-        label: rel.name,
-        animated: true,
-        selected: selection?.kind === 'relationship' && selection.relationshipIndex === index,
-      }));
-  }, [model, selection]);
+  const edges = useMemo<Edge[]>(
+    () => (model ? buildSemanticEdges(model, selection) : []),
+    [model, selection],
+  );
 
   const onNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes((prev) => applyNodeChanges(changes, prev));
@@ -127,6 +156,44 @@ export function GraphView() {
 
   // ---- ontology layer ----
   const [ontNodes, setOntNodes] = useState<Node[]>([]);
+  // Collapsed concept node ids. Tracking *collapsed* (not expanded) makes concepts
+  // default to expanded with no seeding. Keyed by stable `concept:<name>` id so the
+  // set survives model reconciliation and view switches, like dragged positions.
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+
+  const toggleExpand = useCallback((id: string) => {
+    setCollapsed((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const selectAttribute = useCallback(
+    (attr: ConceptAttribute) => {
+      select({
+        kind: 'ontology-relationship',
+        componentIndex: attr.componentIndex,
+        relationshipIndex: attr.relationshipIndex,
+      });
+    },
+    [select],
+  );
+
+  // Full ontology graph: every relationship becomes either an edge (roles that
+  // resolve to concepts) or an attribute sub-element (roles to value types).
+  const ontModel = useMemo(
+    () =>
+      isOnt
+        ? buildOntologyGraphModel(components, selection)
+        : {
+            edges: [],
+            attributesByConceptId: new Map<string, ConceptAttribute[]>(),
+            referencedConcepts: new Set<string>(),
+          },
+    [isOnt, components, selection],
+  );
 
   // Reconcile concept nodes (and, when requested, mapped dataset nodes),
   // preserving user-dragged positions by id.
@@ -143,11 +210,19 @@ export function GraphView() {
         const type = comp?.concept?.type;
         return {
           id,
+          type: 'concept',
           position: positions.get(id) ?? gridPosition(index),
-          data: { label: type ? `${name} (${type})` : name },
+          data: {
+            label: type ? `${name} (${type})` : name,
+            attributes: ontModel.attributesByConceptId.get(id) ?? [],
+            expanded: !collapsed.has(id),
+            onToggleExpand: () => toggleExpand(id),
+            onSelectAttribute: selectAttribute,
+          },
           selected: selection?.kind === 'concept' && selection.componentIndex === index,
         };
       });
+      let extraIndex = components.length;
       if (showMappings) {
         const known = conceptNames(components);
         const { datasetNames } = buildMappingLinks(doc, activeMapIndex, known);
@@ -165,14 +240,29 @@ export function GraphView() {
             },
           });
         });
+        extraIndex += datasetNames.length;
       }
+      nextNodes.push(
+        ...referencedConceptNodes(ontModel.referencedConcepts, positions, extraIndex),
+      );
       return nextNodes;
     });
-  }, [isOnt, components, selection, showMappings, doc, activeMapIndex]);
+  }, [
+    isOnt,
+    components,
+    selection,
+    showMappings,
+    doc,
+    activeMapIndex,
+    ontModel,
+    collapsed,
+    toggleExpand,
+    selectAttribute,
+  ]);
 
   const ontEdges = useMemo<Edge[]>(() => {
     if (!isOnt) return [];
-    const conceptEdges = buildOntologyEdges(components, selection);
+    const conceptEdges = ontModel.edges;
     if (!showMappings) return conceptEdges;
     const known = conceptNames(components);
     const { links } = buildMappingLinks(doc, activeMapIndex, known);
@@ -185,7 +275,7 @@ export function GraphView() {
       style: { strokeDasharray: '6 4' },
     }));
     return [...conceptEdges, ...mapEdges];
-  }, [isOnt, components, selection, showMappings, doc, activeMapIndex]);
+  }, [isOnt, ontModel, components, showMappings, doc, activeMapIndex]);
 
   const onOntNodesChange = useCallback((changes: NodeChange[]) => {
     setOntNodes((prev) => applyNodeChanges(changes, prev));
@@ -218,13 +308,172 @@ export function GraphView() {
 
   const onOntEdgeClick = useCallback(
     (_: unknown, edge: Edge) => {
-      const match = /^orel-(\d+)-(\d+)$/.exec(edge.id);
+      const match = /^orel-(\d+)-(\d+)-\d+$/.exec(edge.id);
       if (!match) return;
       select({
         kind: 'ontology-relationship',
         componentIndex: Number(match[1]),
         relationshipIndex: Number(match[2]),
       });
+    },
+    [select],
+  );
+
+  // ---- unified layer (ontology linked to semantics, in one canvas) ----
+  const [unifiedNodes, setUnifiedNodes] = useState<Node[]>([]);
+
+  // Concept nodes (top lane) + every dataset node (bottom lane). Concept ids are
+  // `concept:<name>`, dataset ids `dataset:<name>`, so the two never collide and
+  // positions/collapse state persist by id across reconciliation and switches.
+  useEffect(() => {
+    if (!isOnt) {
+      setUnifiedNodes([]);
+      return;
+    }
+    setUnifiedNodes((prev) => {
+      const positions = new Map(prev.map((n) => [n.id, n.position]));
+      const known = conceptNames(components);
+      const { datasetNames } = buildMappingLinks(doc, activeMapIndex, known);
+      const mapped = new Set(datasetNames);
+
+      const conceptNodes: Node[] = components.map((comp, index) => {
+        const name = comp?.concept?.name ?? `concept_${index + 1}`;
+        const id = conceptNodeId(name);
+        const type = comp?.concept?.type;
+        return {
+          id,
+          type: 'concept',
+          position: positions.get(id) ?? gridPosition(index),
+          data: {
+            label: type ? `${name} (${type})` : name,
+            attributes: ontModel.attributesByConceptId.get(id) ?? [],
+            expanded: !collapsed.has(id),
+            onToggleExpand: () => toggleExpand(id),
+            onSelectAttribute: selectAttribute,
+          },
+          selected: selection?.kind === 'concept' && selection.componentIndex === index,
+        };
+      });
+
+      const selectedDatasetName =
+        selection?.kind === 'dataset' ? model?.datasets[selection.datasetIndex]?.name : undefined;
+      const datasetNodes: Node[] = (model?.datasets ?? []).map((dataset, index) => {
+        const id = datasetNodeId(dataset.name);
+        return {
+          id,
+          position: positions.get(id) ?? datasetLanePosition(index),
+          data: { label: dataset.name },
+          selected: dataset.name === selectedDatasetName,
+          style: {
+            border: mapped.has(dataset.name)
+              ? '1.5px solid var(--p-color-state-focus, #6d3ad6)'
+              : '1px solid var(--color-border, #ccc)',
+            borderRadius: 8,
+            background: 'var(--color-surface, #fff)',
+          },
+        };
+      });
+
+      const ghostNodes = referencedConceptNodes(
+        ontModel.referencedConcepts,
+        positions,
+        components.length,
+      );
+
+      return [...conceptNodes, ...ghostNodes, ...datasetNodes];
+    });
+  }, [
+    isOnt,
+    components,
+    model,
+    selection,
+    doc,
+    activeMapIndex,
+    ontModel,
+    collapsed,
+    toggleExpand,
+    selectAttribute,
+  ]);
+
+  // All three connection kinds at once, visually distinct: ontology relationships
+  // (solid cobalt), concept→dataset mappings (violet dotted), dataset joins (grey
+  // dashed).
+  const unifiedEdges = useMemo<Edge[]>(() => {
+    if (!isOnt) return [];
+    const ontologyEdges = ontModel.edges.map((e) => ({
+      ...e,
+      style: { stroke: '#2b56d4', strokeWidth: 2 },
+    }));
+    const known = conceptNames(components);
+    const { links } = buildMappingLinks(doc, activeMapIndex, known);
+    const mapEdges: Edge[] = links.map((link, i) => ({
+      id: `map-${i}-${link.dataset}`,
+      source: conceptNodeId(link.concept),
+      target: datasetNodeId(link.dataset),
+      label: 'maps to',
+      animated: false,
+      style: { stroke: '#6d3ad6', strokeWidth: 2, strokeDasharray: '2 5' },
+    }));
+    const joinEdges: Edge[] = (
+      model ? buildSemanticEdges(model, selection, datasetNodeId) : []
+    ).map((e) => ({
+      ...e,
+      animated: false,
+      style: { stroke: '#8a97a8', strokeWidth: 2, strokeDasharray: '6 5' },
+    }));
+    return [...joinEdges, ...mapEdges, ...ontologyEdges];
+  }, [isOnt, ontModel, components, doc, activeMapIndex, model, selection]);
+
+  const onUnifiedNodesChange = useCallback((changes: NodeChange[]) => {
+    setUnifiedNodes((prev) => applyNodeChanges(changes, prev));
+  }, []);
+
+  const onUnifiedConnect = useCallback(
+    (connection: Connection) => {
+      const source = connection.source ?? '';
+      const target = connection.target ?? '';
+      if (source.startsWith('concept:') && target.startsWith('concept:')) {
+        const sourceName = source.slice('concept:'.length);
+        const componentIndex = components.findIndex((c) => c?.concept?.name === sourceName);
+        if (componentIndex >= 0) addOntologyRelationship(componentIndex);
+      } else if (source.startsWith('dataset:') && target.startsWith('dataset:')) {
+        addRelationship({
+          from: source.slice('dataset:'.length),
+          to: target.slice('dataset:'.length),
+        });
+      }
+    },
+    [components, addOntologyRelationship, addRelationship],
+  );
+
+  const onUnifiedNodeClick = useCallback(
+    (_: unknown, node: Node) => {
+      if (node.id.startsWith('concept:')) {
+        const name = node.id.slice('concept:'.length);
+        const componentIndex = components.findIndex((c) => c?.concept?.name === name);
+        if (componentIndex >= 0) select({ kind: 'concept', componentIndex });
+      } else if (node.id.startsWith('dataset:')) {
+        const name = node.id.slice('dataset:'.length);
+        const datasetIndex = model?.datasets.findIndex((d) => d.name === name) ?? -1;
+        if (datasetIndex >= 0) select({ kind: 'dataset', datasetIndex });
+      }
+    },
+    [components, model, select],
+  );
+
+  const onUnifiedEdgeClick = useCallback(
+    (_: unknown, edge: Edge) => {
+      const ont = /^orel-(\d+)-(\d+)-\d+$/.exec(edge.id);
+      if (ont) {
+        select({
+          kind: 'ontology-relationship',
+          componentIndex: Number(ont[1]),
+          relationshipIndex: Number(ont[2]),
+        });
+        return;
+      }
+      const join = /^rel-(\d+)$/.exec(edge.id);
+      if (join) select({ kind: 'relationship', relationshipIndex: Number(join[1]) });
     },
     [select],
   );
@@ -250,7 +499,10 @@ export function GraphView() {
     if (model.datasets.length === 0) return <GraphEmptyState />;
     return (
       <div className="flex h-full min-h-0">
-        <div className="min-w-0 flex-1">{semanticFlow}</div>
+        <div className="relative min-w-0 flex-1">
+          <GraphToolbar layer="semantic-model" />
+          {semanticFlow}
+        </div>
         <aside className="w-96 shrink-0 overflow-auto border-l border-border bg-surface">
           <SelectionDetail diagnostics={diagnostics} />
         </aside>
@@ -262,6 +514,7 @@ export function GraphView() {
     <ReactFlow
       nodes={ontNodes}
       edges={ontEdges}
+      nodeTypes={ontologyNodeTypes}
       onNodesChange={onOntNodesChange}
       onConnect={onOntConnect}
       onNodeClick={onOntNodeClick}
@@ -273,11 +526,31 @@ export function GraphView() {
     </ReactFlow>
   );
 
+  const unifiedFlow = (
+    <ReactFlow
+      nodes={unifiedNodes}
+      edges={unifiedEdges}
+      nodeTypes={ontologyNodeTypes}
+      onNodesChange={onUnifiedNodesChange}
+      onConnect={onUnifiedConnect}
+      onNodeClick={onUnifiedNodeClick}
+      onEdgeClick={onUnifiedEdgeClick}
+      fitView
+    >
+      <Background />
+      <Controls />
+    </ReactFlow>
+  );
+
   // Ontology documents: layer toggle overlaid on the canvas.
-  const ontologyContent =
-    components.length > 0 ? ontologyFlow : <GraphEmptyState mode="ontology" />;
-  const semanticContent =
-    model && model.datasets.length > 0 ? semanticFlow : <GraphEmptyState mode="semantic-model" />;
+  const hasConcepts = components.length > 0;
+  const hasDatasets = !!model && model.datasets.length > 0;
+  const unifiedContent =
+    hasConcepts || hasDatasets ? unifiedFlow : <GraphEmptyState mode="ontology" />;
+  const ontologyContent = hasConcepts ? ontologyFlow : <GraphEmptyState mode="ontology" />;
+  const semanticContent = hasDatasets ? semanticFlow : <GraphEmptyState mode="semantic-model" />;
+  const currentContent =
+    layer === 'unified' ? unifiedContent : layer === 'ontology' ? ontologyContent : semanticContent;
 
   return (
     <div className="flex h-full min-h-0">
@@ -287,10 +560,10 @@ export function GraphView() {
             type="button"
             compact
             icon="none"
-            variant={layer === 'semantic-model' ? 'primary' : 'secondary'}
-            onClick={() => setLayer('semantic-model')}
+            variant={layer === 'unified' ? 'primary' : 'secondary'}
+            onClick={() => setLayer('unified')}
           >
-            Semantic model
+            Unified
           </PButton>
           <PButton
             type="button"
@@ -300,6 +573,15 @@ export function GraphView() {
             onClick={() => setLayer('ontology')}
           >
             Ontology
+          </PButton>
+          <PButton
+            type="button"
+            compact
+            icon="none"
+            variant={layer === 'semantic-model' ? 'primary' : 'secondary'}
+            onClick={() => setLayer('semantic-model')}
+          >
+            Semantic model
           </PButton>
           {layer === 'ontology' && (
             <PButton
@@ -313,7 +595,8 @@ export function GraphView() {
             </PButton>
           )}
         </div>
-        {layer === 'ontology' ? ontologyContent : semanticContent}
+        <GraphToolbar layer={layer} />
+        {currentContent}
       </div>
       <aside className="w-96 shrink-0 overflow-auto border-l border-border bg-surface">
         <SelectionDetail diagnostics={diagnostics} />
