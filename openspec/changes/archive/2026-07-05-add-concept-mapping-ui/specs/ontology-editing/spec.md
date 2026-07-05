@@ -1,44 +1,4 @@
-## Purpose
-Enable authoring of OSI ontology content in the editor, letting users create and edit concepts, ontology relationships, and concept mappings with live validation.
-
-## Requirements
-
-### Requirement: Author concepts
-
-The editor SHALL let the user create, edit, and delete ontology Concepts. The concept
-form SHALL expose `name`, `type` (`EntityType` / `ValueType`), `description`,
-`identify_by`, `extends`, `derived_by`, and `requires`. Concepts SHALL be reachable from
-the Navigator alongside datasets.
-
-#### Scenario: Create a concept
-
-- **WHEN** the user adds a new concept and sets its name and type
-- **THEN** the concept appears in the Navigator and in the exported document's `ontology`
-  block
-
-#### Scenario: Delete a concept
-
-- **WHEN** the user deletes a concept
-- **THEN** the concept is removed from the model and the deletion is confirmed if the
-  concept is referenced by a relationship or mapping
-
-### Requirement: Author ontology relationships
-
-The editor SHALL let the user create, edit, and delete ontology Relationships. The form
-SHALL expose `name`, `multiplicity` (`ManyToOne` / `OneToOne`), `roles` (each selecting a
-`concept` and an optional role name), `verbalizes` templates, `derived_by`, and
-`requires`.
-
-#### Scenario: Define a verbalized relationship
-
-- **WHEN** the user creates a relationship, selects its multiplicity, adds two roles
-  referencing existing concepts, and enters a verbalization template
-- **THEN** the relationship is saved with its multiplicity, roles, and verbalization
-
-#### Scenario: Role must reference a known concept
-
-- **WHEN** the user selects a role concept
-- **THEN** the choices are limited to concepts that exist in the model
+## MODIFIED Requirements
 
 ### Requirement: Author concept mappings
 
@@ -78,15 +38,7 @@ dataset/field pair produces, and all edits SHALL round-trip on export without lo
 - **THEN** the user can switch that mapping to a raw expression input and the entered text is
   preserved verbatim
 
-### Requirement: Live validation of ontology edits
-
-The editor SHALL surface ontology diagnostics live while editing, using the same
-diagnostics surface as the semantic_model editor.
-
-#### Scenario: Mapping references a missing concept
-
-- **WHEN** a concept mapping references a concept that no longer exists
-- **THEN** a diagnostic is shown identifying the broken reference
+## ADDED Requirements
 
 ### Requirement: Mapping expression reference validation
 

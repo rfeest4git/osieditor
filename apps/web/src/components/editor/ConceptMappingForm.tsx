@@ -6,7 +6,13 @@ import type {
   ReferentMapping,
 } from '@osi-editor/osi-schema';
 import { PButton, PButtonPure } from '@porsche-design-system/components-react';
-import { fieldErrors } from '../../lib/diagnostics.js';
+import { useState } from 'react';
+import { fieldErrors, type Path } from '../../lib/diagnostics.js';
+import {
+  composeMappingExpression,
+  parseMappingExpression,
+  type DatasetFields,
+} from '../../lib/mapping.js';
 import { useEditorStore } from '../../store/editorStore.js';
 import { SelectField } from '../ui/SelectField.js';
 import { TextField } from '../ui/TextField.js';
@@ -15,30 +21,36 @@ import { FormShell } from './FormShell.js';
 /**
  * Concept mapping detail form: binds a concept to logical (semantic-model)
  * expressions through the nested `object_mappings` and `link_mappings` trees.
- * The trees are edited structurally — add/remove/edit of referent and child
- * nodes — rather than as raw JSON.
+ * Expressions are edited with a guided Dataset → Field picker sourced from the
+ * bound map's semantic model (with a raw-expression fallback), and relationship
+ * references with a dropdown of the concept's ontology relationships.
  */
 export function ConceptMappingForm({
   conceptMapping,
   mapIndex,
   conceptMappingIndex,
   conceptOptions,
+  datasets,
+  relationshipOptions,
   diagnostics,
 }: {
   conceptMapping: ConceptMapping;
   mapIndex: number;
   conceptMappingIndex: number;
   conceptOptions: string[];
+  datasets: DatasetFields[];
+  relationshipOptions: string[];
   diagnostics: Diagnostic[];
 }) {
   const updateConceptMapping = useEditorStore((s) => s.updateConceptMapping);
   const deleteConceptMapping = useEditorStore((s) => s.deleteConceptMapping);
-  const errorAt = fieldErrors(diagnostics, [
+  const basePath: Path = [
     'ontology_mappings',
     mapIndex,
     'concept_mappings',
     conceptMappingIndex,
-  ]);
+  ];
+  const errorAt = fieldErrors(diagnostics, basePath);
 
   const patch = (p: Partial<ConceptMapping>) =>
     updateConceptMapping(mapIndex, conceptMappingIndex, p);
@@ -52,6 +64,8 @@ export function ConceptMappingForm({
       : []),
     ...conceptOptions,
   ].map((c) => ({ value: c, label: c }));
+
+  const shared = { datasets, relationshipOptions, diagnostics };
 
   return (
     <FormShell
@@ -76,6 +90,8 @@ export function ConceptMappingForm({
           <ObjectMappingEditor
             key={i}
             value={om}
+            path={[...basePath, 'object_mappings', i]}
+            {...shared}
             onChange={(next) =>
               patch({ object_mappings: replaceAt(objectMappings, i, next) })
             }
@@ -94,6 +110,8 @@ export function ConceptMappingForm({
           <LinkMappingEditor
             key={i}
             value={lm}
+            path={[...basePath, 'link_mappings', i]}
+            {...shared}
             onChange={(next) => patch({ link_mappings: replaceAt(linkMappings, i, next) })}
             onRemove={() => patch({ link_mappings: removeAt(linkMappings, i) })}
           />
@@ -104,18 +122,32 @@ export function ConceptMappingForm({
   );
 }
 
+/* ------------------------------- shared props ----------------------------- */
+
+interface NodeContext {
+  datasets: DatasetFields[];
+  relationshipOptions: string[];
+  diagnostics: Diagnostic[];
+  path: Path;
+}
+
 /* --------------------------------- editors -------------------------------- */
 
 function ObjectMappingEditor({
   value,
   onChange,
   onRemove,
-}: {
+  datasets,
+  relationshipOptions,
+  diagnostics,
+  path,
+}: NodeContext & {
   value: ObjectMapping;
   onChange: (next: ObjectMapping) => void;
   onRemove: () => void;
 }) {
   const referents = value.referent_mappings ?? [];
+  const errorAt = fieldErrors(diagnostics, path);
   return (
     <TreeNode label="Object mapping" onRemove={onRemove}>
       <div className="grid grid-cols-2 gap-3">
@@ -124,10 +156,11 @@ function ObjectMappingEditor({
           value={value.concept ?? ''}
           onChange={(concept) => onChange({ ...value, concept: concept || undefined })}
         />
-        <TextField
+        <ExpressionField
           label="Expression"
-          value={value.expression ?? ''}
-          placeholder="dataset.column"
+          value={value.expression}
+          datasets={datasets}
+          error={errorAt('expression')}
           onChange={(expression) => onChange({ ...value, expression: expression || undefined })}
         />
       </div>
@@ -140,6 +173,10 @@ function ObjectMappingEditor({
           <ReferentMappingEditor
             key={i}
             value={rm}
+            datasets={datasets}
+            relationshipOptions={relationshipOptions}
+            diagnostics={diagnostics}
+            path={[...path, 'referent_mappings', i]}
             onChange={(next) =>
               onChange({ ...value, referent_mappings: replaceAt(referents, i, next) })
             }
@@ -157,24 +194,31 @@ function ReferentMappingEditor({
   value,
   onChange,
   onRemove,
-}: {
+  datasets,
+  relationshipOptions,
+  diagnostics,
+  path,
+}: NodeContext & {
   value: ReferentMapping;
   onChange: (next: ReferentMapping) => void;
   onRemove: () => void;
 }) {
   const nested = value.referent_mappings ?? [];
+  const errorAt = fieldErrors(diagnostics, path);
   return (
     <TreeNode label="Referent" onRemove={onRemove}>
       <div className="grid grid-cols-2 gap-3">
-        <TextField
-          label="Relationship"
+        <RelationshipField
           value={value.relationship ?? ''}
+          options={relationshipOptions}
+          error={errorAt('relationship')}
           onChange={(relationship) => onChange({ ...value, relationship })}
         />
-        <TextField
+        <ExpressionField
           label="Expression"
-          value={value.expression ?? ''}
-          placeholder="dataset.column"
+          value={value.expression}
+          datasets={datasets}
+          error={errorAt('expression')}
           onChange={(expression) => onChange({ ...value, expression: expression || undefined })}
         />
       </div>
@@ -189,6 +233,10 @@ function ReferentMappingEditor({
           <ReferentMappingEditor
             key={i}
             value={rm}
+            datasets={datasets}
+            relationshipOptions={relationshipOptions}
+            diagnostics={diagnostics}
+            path={[...path, 'referent_mappings', i]}
             onChange={(next) => onChange({ ...value, referent_mappings: replaceAt(nested, i, next) })}
             onRemove={() => onChange({ ...value, referent_mappings: removeAt(nested, i) })}
           />
@@ -202,23 +250,33 @@ function LinkMappingEditor({
   value,
   onChange,
   onRemove,
-}: {
+  datasets,
+  relationshipOptions,
+  diagnostics,
+  path,
+}: NodeContext & {
   value: LinkMapping;
   onChange: (next: LinkMapping) => void;
   onRemove: () => void;
 }) {
   const children = value.children ?? [];
+  const errorAt = fieldErrors(diagnostics, path);
   return (
     <TreeNode label="Link" onRemove={onRemove}>
-      <TextField
-        label="Relationship"
+      <RelationshipField
         value={value.relationship ?? ''}
+        options={relationshipOptions}
+        error={errorAt('relationship')}
         onChange={(relationship) => onChange({ ...value, relationship: relationship || undefined })}
       />
       <div className="mt-2 rounded border border-border p-2">
         <p className="mb-1 text-xs font-semibold text-content-muted">Object mapping</p>
         <ObjectMappingEditor
           value={value.object_mapping ?? {}}
+          datasets={datasets}
+          relationshipOptions={relationshipOptions}
+          diagnostics={diagnostics}
+          path={[...path, 'object_mapping']}
           onChange={(object_mapping) => onChange({ ...value, object_mapping })}
           onRemove={() => onChange({ ...value, object_mapping: {} })}
         />
@@ -232,12 +290,138 @@ function LinkMappingEditor({
           <LinkMappingEditor
             key={i}
             value={lm}
+            datasets={datasets}
+            relationshipOptions={relationshipOptions}
+            diagnostics={diagnostics}
+            path={[...path, 'children', i]}
             onChange={(next) => onChange({ ...value, children: replaceAt(children, i, next) })}
             onRemove={() => onChange({ ...value, children: removeAt(children, i) })}
           />
         ))}
       </TreeSection>
     </TreeNode>
+  );
+}
+
+/* ------------------------------- guided fields ---------------------------- */
+
+/**
+ * Edits a mapping `expression` as a guided Dataset → Field pair (composing the
+ * `dataset.field` string), with a toggle to a raw-text input for custom
+ * expressions no field pair produces. Defaults to raw when the current value does
+ * not resolve to a known field, or when the map has no datasets yet.
+ */
+function ExpressionField({
+  label,
+  value,
+  datasets,
+  error,
+  onChange,
+}: {
+  label: string;
+  value: string | undefined;
+  datasets: DatasetFields[];
+  error?: string;
+  onChange: (value: string) => void;
+}) {
+  const parsed = parseMappingExpression(value, datasets);
+  const [raw, setRaw] = useState<boolean>(
+    (!!value && !parsed) || datasets.length === 0,
+  );
+  const [dataset, setDataset] = useState<string>(parsed?.dataset ?? '');
+  const [field, setField] = useState<string>(parsed?.field ?? '');
+
+  if (raw) {
+    return (
+      <div className="flex flex-col gap-1">
+        <TextField
+          label={label}
+          value={value ?? ''}
+          placeholder="dataset.field"
+          error={error}
+          onChange={onChange}
+        />
+        {datasets.length > 0 && (
+          <ModeToggle label="Use dataset/field pickers" onClick={() => setRaw(false)} />
+        )}
+      </div>
+    );
+  }
+
+  const datasetOptions = datasets.map((d) => ({ value: d.name, label: d.name }));
+  const fieldOptions = (datasets.find((d) => d.name === dataset)?.fields ?? []).map((f) => ({
+    value: f,
+    label: f,
+  }));
+
+  return (
+    <div className="flex flex-col gap-1">
+      <SelectField
+        label={`${label} · dataset`}
+        value={dataset}
+        options={datasetOptions}
+        error={error}
+        onChange={(d) => {
+          setDataset(d);
+          setField('');
+          onChange(composeMappingExpression(d, ''));
+        }}
+      />
+      <SelectField
+        label="Field"
+        value={field}
+        options={fieldOptions}
+        disabled={!dataset}
+        onChange={(f) => {
+          setField(f);
+          onChange(composeMappingExpression(dataset, f));
+        }}
+      />
+      <ModeToggle label="Enter a raw expression" onClick={() => setRaw(true)} />
+    </div>
+  );
+}
+
+/**
+ * Selects a relationship reference from the mapped concept's ontology
+ * relationships, keeping any current value that is not among them (so existing
+ * documents never lose data).
+ */
+function RelationshipField({
+  value,
+  options,
+  error,
+  onChange,
+}: {
+  value: string;
+  options: string[];
+  error?: string;
+  onChange: (value: string) => void;
+}) {
+  const choices = [
+    ...(value && !options.includes(value) ? [value] : []),
+    ...options,
+  ].map((r) => ({ value: r, label: r }));
+  return (
+    <SelectField
+      label="Relationship"
+      value={value}
+      options={choices}
+      error={error}
+      onChange={onChange}
+    />
+  );
+}
+
+function ModeToggle({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      className="self-start text-xs text-content-muted underline hover:text-content"
+      onClick={onClick}
+    >
+      {label}
+    </button>
   );
 }
 

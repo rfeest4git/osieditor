@@ -142,6 +142,36 @@ export function getOntologyComponents(doc: AnyDraftDocument | null): OntologyCom
   return (doc as { ontology?: OntologyComponent[] }).ontology ?? [];
 }
 
+/**
+ * Datasets (with their field names) of the semantic model that a given ontology
+ * map binds to. Powers the dataset/field pickers in the concept-mapping editor.
+ */
+export function getMapDatasetFields(
+  doc: AnyDraftDocument | null,
+  mapIndex: number,
+): Array<{ name: string; fields: string[] }> {
+  const model = getActiveModel(doc, 0, mapIndex);
+  return (model?.datasets ?? []).map((dataset) => ({
+    name: dataset.name,
+    fields: (dataset.fields ?? []).map((field) => field.name),
+  }));
+}
+
+/**
+ * Names of the ontology relationships defined for a concept, for the relationship
+ * pickers in the concept-mapping editor. Returns [] when the concept is unknown.
+ */
+export function getConceptRelationshipNames(
+  doc: AnyDraftDocument | null,
+  conceptName: string | undefined,
+): string[] {
+  if (!conceptName) return [];
+  const component = getOntologyComponents(doc).find((c) => c.concept?.name === conceptName);
+  return (component?.relationships ?? [])
+    .map((rel) => rel.name)
+    .filter((n): n is string => typeof n === 'string');
+}
+
 export const useEditorStore = create<EditorState>()(
   immer((set) => {
     /** Run a mutation against the active semantic model and flag the doc dirty. */

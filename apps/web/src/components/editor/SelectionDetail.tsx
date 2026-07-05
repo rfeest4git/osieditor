@@ -2,6 +2,8 @@ import type { ConceptMapping, Diagnostic, OntologyComponent } from '@osi-editor/
 import { PText } from '@porsche-design-system/components-react';
 import {
   getActiveModel,
+  getConceptRelationshipNames,
+  getMapDatasetFields,
   getOntologyComponents,
   useEditorStore,
 } from '../../store/editorStore.js';
@@ -71,6 +73,8 @@ export function SelectionDetail({ diagnostics }: { diagnostics: Diagnostic[] }) 
             mapIndex={selection.mapIndex}
             conceptMappingIndex={selection.conceptMappingIndex}
             conceptOptions={conceptOptions}
+            datasets={getMapDatasetFields(doc, selection.mapIndex)}
+            relationshipOptions={getConceptRelationshipNames(doc, conceptMapping.concept)}
             diagnostics={diagnostics}
           />
         );

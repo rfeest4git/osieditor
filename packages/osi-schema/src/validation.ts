@@ -3,8 +3,11 @@ import {
   DraftDocumentSchema,
   DraftOntologyDocumentSchema,
   detectDocumentKind,
+  type LinkMapping,
+  type ObjectMapping,
   type OntologyDocument,
   type OsiDocument,
+  type ReferentMapping,
 } from './model.js';
 
 export type Severity = 'error' | 'warning';
@@ -268,23 +271,81 @@ export function validateOntologySemantics(doc: OntologyDocument): Diagnostic[] {
     });
   });
 
-  // Concept mappings must reference a declared concept.
+  // Concept mappings must reference a declared concept, and their nested object /
+  // link / referent mapping expressions should resolve to a real dataset field.
+  //
+  // Note: a mapping's `relationship` reference is intentionally NOT resolved
+  // against the concept's ontology relationships — valid OSI models (e.g. the
+  // reference flights model) legitimately use relationship names in mappings that
+  // differ from the declared relationship name, so resolution would produce false
+  // positives. The guided relationship picker still steers authoring toward
+  // declared relationships. Expression mismatches are warnings (advisory,
+  // non-blocking) and only fire for bare `dataset.field` references, so
+  // hand-written SQL expressions are left untouched.
   (doc?.ontology_mappings ?? []).forEach((map, mi) => {
+    const datasets = map?.semantic_model?.datasets ?? [];
+
     (map?.concept_mappings ?? []).forEach((cm, cmi) => {
+      const cmPath = ['ontology_mappings', mi, 'concept_mappings', cmi] as Array<string | number>;
+
       if (cm?.concept && !conceptNames.has(cm.concept)) {
         diagnostics.push({
           severity: 'error',
           code: 'dangling_reference',
           message: `Concept mapping references unknown concept "${cm.concept}".`,
-          path: ['ontology_mappings', mi, 'concept_mappings', cmi, 'concept'],
+          path: [...cmPath, 'concept'],
           entityRef: { kind: 'concept-mapping', name: cm.concept },
         });
       }
+
+      /** Warn when an expression looks like a bare `dataset.field` that does not resolve. */
+      const checkExpression = (expression: string | undefined, path: Array<string | number>) => {
+        if (!expression || !BARE_FIELD_REFERENCE.test(expression)) return;
+        const resolves = datasets.some((d) =>
+          (d.fields ?? []).some((f) => expression === `${d.name}.${f.name}`),
+        );
+        if (!resolves) {
+          diagnostics.push({
+            severity: 'warning',
+            code: 'dangling_reference',
+            message: `Mapping expression "${expression}" does not resolve to a dataset field.`,
+            path,
+            entityRef: { kind: 'concept-mapping', name: cm?.concept },
+          });
+        }
+      };
+
+      const walkReferent = (rm: ReferentMapping, path: Array<string | number>) => {
+        checkExpression(rm?.expression, [...path, 'expression']);
+        (rm?.referent_mappings ?? []).forEach((child, i) =>
+          walkReferent(child, [...path, 'referent_mappings', i]),
+        );
+      };
+
+      const walkObject = (om: ObjectMapping, path: Array<string | number>) => {
+        checkExpression(om?.expression, [...path, 'expression']);
+        (om?.referent_mappings ?? []).forEach((rm, i) =>
+          walkReferent(rm, [...path, 'referent_mappings', i]),
+        );
+      };
+
+      const walkLink = (lm: LinkMapping, path: Array<string | number>) => {
+        if (lm?.object_mapping) walkObject(lm.object_mapping, [...path, 'object_mapping']);
+        (lm?.children ?? []).forEach((child, i) => walkLink(child, [...path, 'children', i]));
+      };
+
+      (cm?.object_mappings ?? []).forEach((om, i) =>
+        walkObject(om, [...cmPath, 'object_mappings', i]),
+      );
+      (cm?.link_mappings ?? []).forEach((lm, i) => walkLink(lm, [...cmPath, 'link_mappings', i]));
     });
   });
 
   return diagnostics;
 }
+
+/** A bare `dataset.field` reference (no SQL operators/whitespace) we can resolve. */
+const BARE_FIELD_REFERENCE = /^[A-Za-z_][\w]*\.[A-Za-z_][\w]*$/;
 
 /**
  * Full validation: structural (Zod) first, then semantic checks on whatever

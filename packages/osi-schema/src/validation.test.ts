@@ -188,4 +188,76 @@ describe('validateOntologySemantics', () => {
       diags.some((d) => d.code === 'dangling_reference' && d.entityRef?.kind === 'concept-mapping'),
     ).toBe(true);
   });
+
+  it('warns when a mapping expression does not resolve to a dataset field', () => {
+    const doc = ontologyDoc({
+      ontology_mappings: [
+        {
+          semantic_model: {
+            name: 'm',
+            datasets: [
+              {
+                name: 'runway',
+                source: 'db.runway',
+                fields: [
+                  { name: 'id', expression: { dialects: [{ dialect: 'ANSI_SQL', expression: 'id' }] } },
+                ],
+              },
+            ],
+          },
+          concept_mappings: [
+            {
+              concept: 'Airport',
+              object_mappings: [{ expression: 'runway.ghost_field' }],
+            },
+          ],
+        },
+      ],
+    });
+    const diags = validate(doc);
+    const warn = diags.find(
+      (d) => d.severity === 'warning' && d.code === 'dangling_reference',
+    );
+    expect(warn?.message).toContain('runway.ghost_field');
+    expect(warn?.path).toEqual([
+      'ontology_mappings',
+      0,
+      'concept_mappings',
+      0,
+      'object_mappings',
+      0,
+      'expression',
+    ]);
+  });
+
+  it('does not warn for a resolving reference or a raw SQL expression', () => {
+    const doc = ontologyDoc({
+      ontology_mappings: [
+        {
+          semantic_model: {
+            name: 'm',
+            datasets: [
+              {
+                name: 'runway',
+                source: 'db.runway',
+                fields: [
+                  { name: 'id', expression: { dialects: [{ dialect: 'ANSI_SQL', expression: 'id' }] } },
+                ],
+              },
+            ],
+          },
+          concept_mappings: [
+            {
+              concept: 'Airport',
+              object_mappings: [{ expression: 'runway.id' }],
+              link_mappings: [
+                { object_mapping: { expression: 'CAST(id AS VARCHAR)' }, relationship: 'anything' },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    expect(validate(doc).some((d) => d.severity === 'warning')).toBe(false);
+  });
 });
