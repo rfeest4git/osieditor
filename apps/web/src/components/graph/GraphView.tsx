@@ -229,12 +229,20 @@ function ArrangeControl({
     requestAnimationFrame(() => fitView({ duration: 200 }));
   }, [getNodes, bandOf, setNodes, fitView]);
 
+  // Sole authority for the initial fit (the flows carry no `fitView` prop). On a
+  // layer's first measurement, arrange() packs by measured size AND fits — so the
+  // viewport never fits the rough estimated layout first (which would jump). On a
+  // return visit (already arranged, e.g. after the per-layer remount) we only
+  // reframe, preserving the user's positions.
   useEffect(() => {
-    if (!nodesInitialized || arrangedLayers.current.has(layerKey)) return;
-    if (getNodes().length === 0) return;
+    if (!nodesInitialized || getNodes().length === 0) return;
+    if (arrangedLayers.current.has(layerKey)) {
+      requestAnimationFrame(() => fitView({ duration: 200 }));
+      return;
+    }
     arrangedLayers.current.add(layerKey);
     arrange();
-  }, [nodesInitialized, layerKey, arrangedLayers, getNodes, arrange]);
+  }, [nodesInitialized, layerKey, arrangedLayers, getNodes, fitView, arrange]);
 
   return (
     <Panel position="top-right">
@@ -863,9 +871,10 @@ export function GraphView() {
   );
 
   const semanticFlow = (
-    // `key` forces a remount per layer so returning to a visited layer re-fits the
-    // viewport (the fitView-on-init prop only fires on mount); node positions live
-    // in parent state keyed by id, so they survive the remount.
+    // `key` forces a remount per layer so returning to a visited layer re-runs
+    // ArrangeControl's fit; node positions live in parent state keyed by id, so
+    // they survive the remount. No `fitView` prop — ArrangeControl owns fitting so
+    // the first fit lands on the measured layout, not the rough estimate.
     <ReactFlow
       key="semantic"
       nodes={nodes}
@@ -876,7 +885,6 @@ export function GraphView() {
       onConnect={onConnect}
       onNodeClick={onNodeClick}
       onEdgeClick={onEdgeClick}
-      fitView
     >
       <Background />
       <Controls />
@@ -918,7 +926,6 @@ export function GraphView() {
       onConnect={onOntConnect}
       onNodeClick={onOntNodeClick}
       onEdgeClick={onOntEdgeClick}
-      fitView
     >
       <Background />
       <Controls />
@@ -943,7 +950,6 @@ export function GraphView() {
       onConnect={onUnifiedConnect}
       onNodeClick={onUnifiedNodeClick}
       onEdgeClick={onUnifiedEdgeClick}
-      fitView
     >
       <Background />
       <Controls />
