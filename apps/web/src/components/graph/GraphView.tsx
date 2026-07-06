@@ -41,7 +41,6 @@ import { GraphEmptyState } from './GraphEmptyState.js';
 import { GraphToolbar } from './GraphToolbar.js';
 import { MetricNode } from './MetricNode.js';
 import {
-  arrangeBoxes,
   buildMappingLinks,
   buildMetricRows,
   buildOntologyGraphModel,
@@ -52,13 +51,16 @@ import {
   datasetFieldsById,
   datasetNodeId,
   gridPosition,
-  layoutEstimatedBands,
+  layoutEstimatedStar,
+  layoutEstimatedStarGrouped,
   metricNodeId,
+  starLayout,
+  starLayoutGrouped,
   type ConceptAttribute,
   type DomainNodeBounds,
   type EstimatedItem,
   type FieldRow,
-  type LayoutBox,
+  type LayoutEdge,
   type RegionRect,
 } from './ontologyGraph.js';
 
@@ -81,17 +83,12 @@ const fieldRowText = (f: FieldRow): string => (f.detail ? `${f.name} ${f.detail}
 /** Text of a concept attribute row (name + value type), used to estimate node width. */
 const attrRowText = (a: ConceptAttribute): string => `${a.name} ${a.valueType}`;
 
-/** Band classifier for the semantic-model layer: datasets above metrics. */
-const semanticBandOf = (n: Node): number => (n.type === 'metric' ? 1 : 0);
-/** Band classifier for the ontology layer: concepts above mapped-datasets / ghosts. */
-const ontologyBandOf = (n: Node): number =>
-  n.type === 'concept' && !(n.data as { referenced?: boolean } | undefined)?.referenced ? 0 : 1;
-/** Band classifier for the unified layer: concepts (+ ghosts) above datasets above metrics. */
-const unifiedBandOf = (n: Node): number =>
-  n.type === 'concept' ? 0 : n.type === 'metric' ? 2 : 1;
+/** Layout edges (source/target ids only) from the layer's React Flow edges. */
+const toLayoutEdges = (edges: Edge[]): LayoutEdge[] =>
+  edges.map((e) => ({ source: e.source, target: e.target }));
 
-/** Build layout boxes from the nodes' real measured sizes (falls back to any known size). */
-function measuredBoxes(nodes: Node[], bandOf: (n: Node) => number): LayoutBox[] {
+/** Layout boxes from the nodes' real measured sizes (falls back to any known size). */
+function measuredBoxes(nodes: Node[], bandOf: (n: Node) => number) {
   return nodes.map((n) => ({
     id: n.id,
     width: n.measured?.width ?? n.width ?? 200,
@@ -106,6 +103,9 @@ type Domain = 'ontology' | 'semantic';
 /** Which domain region a node belongs to. Concepts (incl. ghosts) are ontology; everything else semantic. */
 const domainOf = (type: string | undefined): Domain =>
   type === 'concept' ? 'ontology' : 'semantic';
+
+/** Numeric domain band for the grouped star layout: ontology (0) stacked above semantic (1). */
+const domainBandOf = (n: Node): number => (domainOf(n.type) === 'ontology' ? 0 : 1);
 
 /** Label + colour for each domain's region box, keyed to the concept/dataset accents. */
 const REGION_META: Record<Domain, { label: string; color: string }> = {
@@ -197,28 +197,38 @@ function regionsEqual(a: RegionRect[], b: RegionRect[]): boolean {
 
 /**
  * In-canvas "Arrange" control. Lives inside `<ReactFlow>` so it can read each
- * node's real *measured* size and repack them into non-overlapping bands — the
- * reliable fix the estimated initial layout can only approximate. Also runs the
- * arrange once, automatically, the first time a layer's nodes are measured; after
- * that it never overrides the user's positions (tracked per layer via
- * `arrangedLayers`) — the button re-runs it on demand.
+ * node's real *measured* size and repack them into the edge-aware star-schema
+ * layout — the reliable fix the estimated initial layout can only approximate.
+ * Also runs the arrange once, automatically, the first time a layer's nodes are
+ * measured; after that it never overrides the user's positions (tracked per layer
+ * via `arrangedLayers`) — the button re-runs it on demand.
+ *
+ * `edges` supplies the layer's connectivity so placement is driven by the graph's
+ * topology. When `grouped` is set the unified layer lays each domain out as its
+ * own star cluster and stacks them so their region boxes never overlap.
  */
 function ArrangeControl({
-  bandOf,
+  edges,
   setNodes,
   layerKey,
   arrangedLayers,
-}: {
-  bandOf: (n: Node) => number;
+  grouped = false,
+}: Readonly<{
+  edges: Edge[];
   setNodes: Dispatch<SetStateAction<Node[]>>;
   layerKey: string;
   arrangedLayers: RefObject<Set<string>>;
-}) {
+  grouped?: boolean;
+}>) {
   const { getNodes, fitView } = useReactFlow();
   const nodesInitialized = useNodesInitialized();
 
   const arrange = useCallback(() => {
-    const positions = arrangeBoxes(measuredBoxes(getNodes(), bandOf));
+    const boxes = measuredBoxes(getNodes(), grouped ? domainBandOf : () => 0);
+    const layoutEdges = toLayoutEdges(edges);
+    const positions = grouped
+      ? starLayoutGrouped(boxes, layoutEdges)
+      : starLayout(boxes, layoutEdges);
     if (positions.size === 0) return;
     setNodes((prev) =>
       prev.map((n) => {
@@ -228,7 +238,7 @@ function ArrangeControl({
     );
     // Reframe after the DOM settles so the freshly arranged graph is in view.
     requestAnimationFrame(() => fitView({ duration: 200 }));
-  }, [getNodes, bandOf, setNodes, fitView]);
+  }, [getNodes, edges, grouped, setNodes, fitView]);
 
   // Sole authority for the initial fit (the flows carry no `fitView` prop). On a
   // layer's first measurement, arrange() packs by measured size AND fits — so the
@@ -361,25 +371,29 @@ export function GraphView() {
         selection?.kind === 'dataset' ? model.datasets[selection.datasetIndex]?.name : undefined;
       const fieldsById = datasetFieldsById(model);
       const metricRows = buildMetricRows(model);
-      // Size-aware bands: datasets (sized by their expanded field rows) above a
-      // metric band. Only supplies positions for ids without a remembered one; the
-      // measured "Arrange" action tightens this once real node sizes are known.
-      const computed = layoutEstimatedBands([
-        model.datasets.map((dataset): EstimatedItem => {
-          const fields = fieldsById.get(dataset.name) ?? [];
-          const expanded = !collapsed.has(datasetNodeId(dataset.name));
-          return {
-            id: dataset.name,
-            rows: (expanded ? fields.length : 0) + (dataset.description ? 2 : 0),
-            texts: [dataset.name, dataset.description ?? '', ...(expanded ? fields.map(fieldRowText) : [])],
-          };
-        }),
-        metricRows.map((metric): EstimatedItem => ({
-          id: metricNodeId(metric.name),
-          rows: metric.description ? 2 : 0,
-          texts: [metric.name],
-        })),
-      ]);
+      // Edge-aware star layout: datasets fan around their most-connected hub via
+      // the relationship edges; metrics (edgeless) tuck into a side grid. Only
+      // supplies positions for ids without a remembered one; the measured "Arrange"
+      // action tightens this once real node sizes are known.
+      const computed = layoutEstimatedStar(
+        [
+          ...model.datasets.map((dataset): EstimatedItem => {
+            const fields = fieldsById.get(dataset.name) ?? [];
+            const expanded = !collapsed.has(datasetNodeId(dataset.name));
+            return {
+              id: dataset.name,
+              rows: (expanded ? fields.length : 0) + (dataset.description ? 2 : 0),
+              texts: [dataset.name, dataset.description ?? '', ...(expanded ? fields.map(fieldRowText) : [])],
+            };
+          }),
+          ...metricRows.map((metric): EstimatedItem => ({
+            id: metricNodeId(metric.name),
+            rows: metric.description ? 2 : 0,
+            texts: [metric.name],
+          })),
+        ],
+        toLayoutEdges(buildSemanticEdges(model, selection)),
+      );
       const datasetNodes: Node[] = model.datasets.map((dataset, index) => {
         const expandKey = datasetNodeId(dataset.name);
         return {
@@ -490,37 +504,47 @@ export function GraphView() {
     setOntNodes((prev) => {
       const positions = new Map(prev.map((n) => [n.id, n.position]));
       const known = conceptNames(components);
-      const mappedNames = showMappings
-        ? buildMappingLinks(doc, activeMapIndex, known).datasetNames
-        : [];
-      // Concepts (sized by their attribute rows) form the top band; mapped
-      // datasets and ghost concepts sit in a band below, clear of the concepts.
-      const computed = layoutEstimatedBands([
-        components.map((comp, index): EstimatedItem => {
-          const name = comp?.concept?.name ?? `concept_${index + 1}`;
-          const id = conceptNodeId(name);
-          const type = comp?.concept?.type;
-          const description = comp?.concept?.description ?? comp?.description;
-          const attrs = ontModel.attributesByConceptId.get(id) ?? [];
-          const expanded = !collapsed.has(id);
-          return {
-            id,
-            rows: (expanded ? attrs.length : 0) + (description ? 2 : 0),
-            texts: [
-              type ? `${name} (${type})` : name,
-              description ?? '',
-              ...(expanded ? attrs.map(attrRowText) : []),
-            ],
-          };
-        }),
+      const mapping = showMappings
+        ? buildMappingLinks(doc, activeMapIndex, known)
+        : { datasetNames: [], links: [] };
+      const mappedNames = mapping.datasetNames;
+      // Edge-aware star layout over concepts, mapped datasets and ghost concepts:
+      // each concept fans its related concepts (and mapped datasets) around it via
+      // the ontology + mapping edges. Only fills ids without a remembered position;
+      // the measured "Arrange" action tightens it with real sizes.
+      const computed = layoutEstimatedStar(
         [
+          ...components.map((comp, index): EstimatedItem => {
+            const name = comp?.concept?.name ?? `concept_${index + 1}`;
+            const id = conceptNodeId(name);
+            const type = comp?.concept?.type;
+            const description = comp?.concept?.description ?? comp?.description;
+            const attrs = ontModel.attributesByConceptId.get(id) ?? [];
+            const expanded = !collapsed.has(id);
+            return {
+              id,
+              rows: (expanded ? attrs.length : 0) + (description ? 2 : 0),
+              texts: [
+                type ? `${name} (${type})` : name,
+                description ?? '',
+                ...(expanded ? attrs.map(attrRowText) : []),
+              ],
+            };
+          }),
           ...mappedNames.map((n): EstimatedItem => ({ id: datasetNodeId(n), texts: [n] })),
           ...[...ontModel.referencedConcepts].map((n): EstimatedItem => ({
             id: conceptNodeId(n),
             texts: [n],
           })),
         ],
-      ]);
+        [
+          ...toLayoutEdges(ontModel.edges),
+          ...mapping.links.map((l) => ({
+            source: conceptNodeId(l.concept),
+            target: datasetNodeId(l.dataset),
+          })),
+        ],
+      );
 
       const nextNodes: Node[] = components.map((comp, index) => {
         const name = comp?.concept?.name ?? `concept_${index + 1}`;
@@ -656,54 +680,71 @@ export function GraphView() {
         : new Map<string, FieldRow[]>();
       const metricRows = buildMetricRows(model ?? { metrics: [] });
 
-      // Three flexing bands: concepts (+ ghost concepts) above datasets above
-      // metrics, each band shelf-packed by node size so a tall/wide node in one
-      // band never overlaps an adjacent band. Only fills ids without a remembered
-      // position; the measured "Arrange" action tightens it with real sizes.
-      const computed = layoutEstimatedBands([
+      // Domain-grouped star layout: the ontology domain (concepts + ghost concepts)
+      // is laid out as its own star cluster and stacked above the semantic domain
+      // (datasets + metrics), so the two domain region boxes never overlap while
+      // each domain is arranged around its hubs. Only fills ids without a
+      // remembered position; the measured "Arrange" action tightens it.
+      const computed = layoutEstimatedStarGrouped(
         [
-          ...components.map((comp, index): EstimatedItem => {
-            const name = comp?.concept?.name ?? `concept_${index + 1}`;
-            const id = conceptNodeId(name);
-            const type = comp?.concept?.type;
-            const description = comp?.concept?.description ?? comp?.description;
-            const attrs = ontModel.attributesByConceptId.get(id) ?? [];
-            const expanded = !collapsed.has(id);
-            return {
-              id,
-              rows: (expanded ? attrs.length : 0) + (description ? 2 : 0),
-              texts: [
-                type ? `${name} (${type})` : name,
-                description ?? '',
-                ...(expanded ? attrs.map(attrRowText) : []),
-              ],
-            };
-          }),
-          ...[...ontModel.referencedConcepts].map((n): EstimatedItem => ({
-            id: conceptNodeId(n),
-            texts: [n],
-          })),
+          [
+            ...components.map((comp, index): EstimatedItem => {
+              const name = comp?.concept?.name ?? `concept_${index + 1}`;
+              const id = conceptNodeId(name);
+              const type = comp?.concept?.type;
+              const description = comp?.concept?.description ?? comp?.description;
+              const attrs = ontModel.attributesByConceptId.get(id) ?? [];
+              const expanded = !collapsed.has(id);
+              return {
+                id,
+                rows: (expanded ? attrs.length : 0) + (description ? 2 : 0),
+                texts: [
+                  type ? `${name} (${type})` : name,
+                  description ?? '',
+                  ...(expanded ? attrs.map(attrRowText) : []),
+                ],
+              };
+            }),
+            ...[...ontModel.referencedConcepts].map((n): EstimatedItem => ({
+              id: conceptNodeId(n),
+              texts: [n],
+            })),
+          ],
+          [
+            ...(model?.datasets ?? []).map((dataset): EstimatedItem => {
+              const id = datasetNodeId(dataset.name);
+              const fields = fieldsById.get(id) ?? [];
+              const expanded = !collapsed.has(id);
+              return {
+                id,
+                rows: (expanded ? fields.length : 0) + (dataset.description ? 2 : 0),
+                texts: [
+                  dataset.name,
+                  dataset.description ?? '',
+                  ...(expanded ? fields.map(fieldRowText) : []),
+                ],
+              };
+            }),
+            ...metricRows.map((metric): EstimatedItem => ({
+              id: metricNodeId(metric.name),
+              rows: metric.description ? 2 : 0,
+              texts: [metric.name],
+            })),
+          ],
         ],
-        (model?.datasets ?? []).map((dataset): EstimatedItem => {
-          const id = datasetNodeId(dataset.name);
-          const fields = fieldsById.get(id) ?? [];
-          const expanded = !collapsed.has(id);
-          return {
-            id,
-            rows: (expanded ? fields.length : 0) + (dataset.description ? 2 : 0),
-            texts: [
-              dataset.name,
-              dataset.description ?? '',
-              ...(expanded ? fields.map(fieldRowText) : []),
-            ],
-          };
-        }),
-        metricRows.map((metric): EstimatedItem => ({
-          id: metricNodeId(metric.name),
-          rows: metric.description ? 2 : 0,
-          texts: [metric.name],
-        })),
-      ]);
+        [
+          ...toLayoutEdges(ontModel.edges),
+          ...(model ? toLayoutEdges(buildSemanticEdges(model, selection, datasetNodeId)) : []),
+          // Concept→dataset "maps to" links so the semantic band is ordered to sit
+          // beneath its mapped concepts, minimising cross-layer edge crossings.
+          ...buildMappingLinks(doc, activeMapIndex, known).links.map(
+            (link): LayoutEdge => ({
+              source: conceptNodeId(link.concept),
+              target: datasetNodeId(link.dataset),
+            }),
+          ),
+        ],
+      );
 
       const conceptNodes: Node[] = components.map((comp, index) => {
         const name = comp?.concept?.name ?? `concept_${index + 1}`;
@@ -891,7 +932,7 @@ export function GraphView() {
       <Controls />
       <BandRegions />
       <ArrangeControl
-        bandOf={semanticBandOf}
+        edges={edges}
         setNodes={setNodes}
         layerKey="semantic"
         arrangedLayers={arrangedLayers}
@@ -930,7 +971,7 @@ export function GraphView() {
       <Controls />
       <BandRegions />
       <ArrangeControl
-        bandOf={ontologyBandOf}
+        edges={ontEdges}
         setNodes={setOntNodes}
         layerKey="ontology"
         arrangedLayers={arrangedLayers}
@@ -954,10 +995,11 @@ export function GraphView() {
       <Controls />
       <BandRegions />
       <ArrangeControl
-        bandOf={unifiedBandOf}
+        edges={unifiedEdges}
         setNodes={setUnifiedNodes}
         layerKey="unified"
         arrangedLayers={arrangedLayers}
+        grouped
       />
     </ReactFlow>
   );

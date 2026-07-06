@@ -11,9 +11,12 @@ import {
   gridPosition,
   layoutEstimatedBands,
   reconcilePositions,
+  starLayout,
+  starLayoutGrouped,
   type DomainNodeBounds,
   type EstimatedItem,
   type LayoutBox,
+  type LayoutEdge,
   type SemanticModelLike,
 } from './ontologyGraph.js';
 
@@ -288,5 +291,236 @@ describe('reconcilePositions', () => {
     const resolve = (id: string) => remembered.get(id) ?? computed.get(id);
     expect(resolve('orders')).toEqual(dragged); // remembered wins, ignores computed
     expect(resolve('customers')).toEqual(computed.get('customers')); // new id → computed slot
+  });
+});
+
+/** Centre point of a laid-out box (positions are top-left corners). */
+function centreOf(box: LayoutBox, positions: Map<string, { x: number; y: number }>): { x: number; y: number } {
+  const p = positions.get(box.id);
+  if (!p) throw new Error(`no position for ${box.id}`);
+  return { x: p.x + box.width / 2, y: p.y + box.height / 2 };
+}
+
+/** Union bounding box of a subset of laid-out boxes. */
+function unionBox(boxes: LayoutBox[], positions: Map<string, { x: number; y: number }>): Box {
+  const rects = boxesFor(boxes, positions);
+  const minX = Math.min(...rects.map((r) => r.x));
+  const minY = Math.min(...rects.map((r) => r.y));
+  const maxX = Math.max(...rects.map((r) => r.x + r.w));
+  const maxY = Math.max(...rects.map((r) => r.y + r.h));
+  return { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+}
+
+/** Orientation of the ordered triple (a, b, c): >0 ccw, <0 cw, 0 collinear. */
+function cross(a: { x: number; y: number }, b: { x: number; y: number }, c: { x: number; y: number }): number {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+/** True when segments p1p2 and p3p4 properly cross at an interior point. */
+function segmentsCross(
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  p3: { x: number; y: number },
+  p4: { x: number; y: number },
+): boolean {
+  const d1 = cross(p3, p4, p1);
+  const d2 = cross(p3, p4, p2);
+  const d3 = cross(p1, p2, p3);
+  const d4 = cross(p1, p2, p4);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+/** Assert no two edges cross except where they share an endpoint node. */
+function expectNoEdgeCrossings(
+  boxes: LayoutBox[],
+  edges: LayoutEdge[],
+  positions: Map<string, { x: number; y: number }>,
+): void {
+  const byId = new Map(boxes.map((b) => [b.id, b]));
+  const pt = (id: string) => centreOf(byId.get(id)!, positions);
+  for (let i = 0; i < edges.length; i++) {
+    for (let j = i + 1; j < edges.length; j++) {
+      const a = edges[i]!;
+      const b = edges[j]!;
+      const shared = a.source === b.source || a.source === b.target || a.target === b.source || a.target === b.target;
+      if (shared) continue;
+      expect(segmentsCross(pt(a.source), pt(a.target), pt(b.source), pt(b.target))).toBe(false);
+    }
+  }
+}
+
+describe('starLayout', () => {
+  it('places a hub and its neighbours without overlap across wildly mixed sizes', () => {
+    // A hub fanning out to neighbours including one node far taller than the rest.
+    const boxes: LayoutBox[] = [
+      { id: 'hub', width: 240, height: 120, band: 0 },
+      { id: 'a', width: 200, height: 90, band: 0 },
+      { id: 'b', width: 460, height: 1400, band: 0 }, // the 50-field-node case: very tall
+      { id: 'c', width: 180, height: 80, band: 0 },
+      { id: 'd', width: 320, height: 220, band: 0 },
+      { id: 'e', width: 200, height: 90, band: 0 },
+    ];
+    const edges: LayoutEdge[] = ['a', 'b', 'c', 'd', 'e'].map((n) => ({ source: 'hub', target: n }));
+    expectNoOverlap(boxesFor(boxes, starLayout(boxes, edges)));
+  });
+
+  it('distributes a hub`s neighbours around it so their spokes do not cross', () => {
+    const boxes: LayoutBox[] = [
+      { id: 'hub', width: 220, height: 120, band: 0 },
+      ...['a', 'b', 'c', 'd', 'e', 'f'].map((id): LayoutBox => ({ id, width: 200, height: 100, band: 0 })),
+    ];
+    const edges: LayoutEdge[] = ['a', 'b', 'c', 'd', 'e', 'f'].map((n) => ({ source: 'hub', target: n }));
+    const positions = starLayout(boxes, edges);
+
+    // Every neighbour sits at a distinct angle around the hub (radiating outward).
+    const hub = centreOf(boxes[0]!, positions);
+    const angles = ['a', 'b', 'c', 'd', 'e', 'f'].map((id) => {
+      const c = centreOf(boxes.find((b) => b.id === id)!, positions);
+      return Math.atan2(c.y - hub.y, c.x - hub.x);
+    });
+    expect(new Set(angles.map((a) => a.toFixed(4))).size).toBe(angles.length);
+    // Spokes share the hub endpoint, so they never cross one another.
+    expectNoEdgeCrossings(boxes, edges, positions);
+    expectNoOverlap(boxesFor(boxes, positions));
+  });
+
+  it('orders mutually connected neighbours adjacently to avoid crossings', () => {
+    // Hub → a,b,c,d, with a–b and c–d also connected: the layout should place each
+    // connected pair adjacently on the ring so the a–b / c–d edges do not cross spokes.
+    const boxes: LayoutBox[] = [
+      { id: 'hub', width: 220, height: 120, band: 0 },
+      ...['a', 'b', 'c', 'd'].map((id): LayoutBox => ({ id, width: 200, height: 100, band: 0 })),
+    ];
+    const edges: LayoutEdge[] = [
+      ...['a', 'b', 'c', 'd'].map((n) => ({ source: 'hub', target: n })),
+      { source: 'a', target: 'b' },
+      { source: 'c', target: 'd' },
+    ];
+    const positions = starLayout(boxes, edges);
+    const hub = centreOf(boxes[0]!, positions);
+    const angleOf = (id: string) => {
+      const c = centreOf(boxes.find((b) => b.id === id)!, positions);
+      return Math.atan2(c.y - hub.y, c.x - hub.x);
+    };
+    const order = ['a', 'b', 'c', 'd'].sort((x, y) => angleOf(x) - angleOf(y));
+    const cyclicAdjacent = (x: string, z: string) => {
+      const i = order.indexOf(x);
+      const j = order.indexOf(z);
+      const diff = Math.abs(i - j);
+      return diff === 1 || diff === order.length - 1;
+    };
+    expect(cyclicAdjacent('a', 'b')).toBe(true);
+    expect(cyclicAdjacent('c', 'd')).toBe(true);
+    expectNoOverlap(boxesFor(boxes, positions));
+  });
+
+  it('packs separate components and edgeless nodes clear of the connected clusters', () => {
+    const comp1: LayoutBox[] = [
+      { id: 'h1', width: 220, height: 120, band: 0 },
+      { id: 'a1', width: 200, height: 100, band: 0 },
+      { id: 'b1', width: 200, height: 100, band: 0 },
+    ];
+    const comp2: LayoutBox[] = [
+      { id: 'h2', width: 220, height: 120, band: 0 },
+      { id: 'a2', width: 200, height: 100, band: 0 },
+      { id: 'b2', width: 200, height: 100, band: 0 },
+    ];
+    const edgeless: LayoutBox[] = [
+      { id: 'e1', width: 180, height: 80, band: 0 },
+      { id: 'e2', width: 180, height: 80, band: 0 },
+      { id: 'e3', width: 180, height: 80, band: 0 },
+    ];
+    const boxes = [...comp1, ...comp2, ...edgeless];
+    const edges: LayoutEdge[] = [
+      { source: 'h1', target: 'a1' },
+      { source: 'h1', target: 'b1' },
+      { source: 'h2', target: 'a2' },
+      { source: 'h2', target: 'b2' },
+    ];
+    const positions = starLayout(boxes, edges);
+    expectNoOverlap(boxesFor(boxes, positions));
+
+    // The two connected clusters and the edgeless grid occupy disjoint bounding boxes.
+    const b1 = unionBox(comp1, positions);
+    const b2 = unionBox(comp2, positions);
+    const be = unionBox(edgeless, positions);
+    expect(intersects(b1, b2)).toBe(false);
+    expect(intersects(b1, be)).toBe(false);
+    expect(intersects(b2, be)).toBe(false);
+  });
+});
+
+describe('starLayoutGrouped', () => {
+  it('keeps domain clusters spatially separated so their region boxes do not overlap', () => {
+    // Band 0 = ontology (concepts), band 1 = semantic (datasets), each internally
+    // connected. The grouped layout must stack them so the domain bounding boxes,
+    // and thus their region boxes, never intersect — even with a tall dataset node.
+    const ontology: LayoutBox[] = [
+      { id: 'c-hub', width: 240, height: 120, band: 0 },
+      { id: 'c-a', width: 200, height: 100, band: 0 },
+      { id: 'c-b', width: 200, height: 100, band: 0 },
+    ];
+    const semantic: LayoutBox[] = [
+      { id: 'd-hub', width: 260, height: 140, band: 1 },
+      { id: 'd-a', width: 220, height: 100, band: 1 },
+      { id: 'd-b', width: 460, height: 1200, band: 1 }, // tall dataset
+    ];
+    const boxes = [...ontology, ...semantic];
+    const edges: LayoutEdge[] = [
+      { source: 'c-hub', target: 'c-a' },
+      { source: 'c-hub', target: 'c-b' },
+      { source: 'd-hub', target: 'd-a' },
+      { source: 'd-hub', target: 'd-b' },
+    ];
+    const positions = starLayoutGrouped(boxes, edges);
+    expectNoOverlap(boxesFor(boxes, positions));
+
+    const ontBox = unionBox(ontology, positions);
+    const semBox = unionBox(semantic, positions);
+    expect(intersects(ontBox, semBox)).toBe(false);
+    // Region rects derived from the domain bounds also stay clear of each other.
+    const bounds: DomainNodeBounds[] = boxes.map((b) => {
+      const p = positions.get(b.id)!;
+      return { domain: b.band === 0 ? 'ontology' : 'semantic', x: p.x, y: p.y, width: b.width, height: b.height };
+    });
+    const rects = computeRegionRects(bounds);
+    expect(rects).toHaveLength(2);
+    const asBox = (r: { x: number; y: number; width: number; height: number }): Box => ({
+      x: r.x,
+      y: r.y,
+      w: r.width,
+      h: r.height,
+    });
+    expect(intersects(asBox(rects[0]!), asBox(rects[1]!))).toBe(false);
+  });
+
+  it('orders the lower band by its cross-layer partners so mapping edges do not cross', () => {
+    // Two concepts (top band) each map to a dataset (bottom band), but the id order
+    // of the datasets is the reverse of their partners. Without alignment the two
+    // "maps to" edges would cross; the grouped layout must order the bottom band by
+    // partner position so the crossings disappear.
+    const concepts: LayoutBox[] = [
+      { id: 'c1', width: 200, height: 100, band: 0 },
+      { id: 'c2', width: 200, height: 100, band: 0 },
+    ];
+    const datasets: LayoutBox[] = [
+      { id: 'd1', width: 200, height: 100, band: 1 },
+      { id: 'd2', width: 200, height: 100, band: 1 },
+    ];
+    const boxes = [...concepts, ...datasets];
+    // c1 (left) ↔ d2, c2 (right) ↔ d1: reversed id order on purpose.
+    const mapping: LayoutEdge[] = [
+      { source: 'c1', target: 'd2' },
+      { source: 'c2', target: 'd1' },
+    ];
+    const positions = starLayoutGrouped(boxes, mapping);
+    expectNoOverlap(boxesFor(boxes, positions));
+
+    // The bottom band is reordered so d2 sits under c1 (left) and d1 under c2 (right).
+    const x = (id: string) => positions.get(id)!.x;
+    expect(x('c1')).toBeLessThan(x('c2'));
+    expect(x('d2')).toBeLessThan(x('d1'));
+    // With the aligned ordering the two mapping edges no longer cross.
+    expectNoEdgeCrossings(boxes, mapping, positions);
   });
 });

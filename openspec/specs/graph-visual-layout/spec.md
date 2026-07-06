@@ -3,22 +3,30 @@
 ## Purpose
 TBD - created by archiving change graph-layout-and-colors. Update Purpose after archive.
 ## Requirements
-### Requirement: Nodes do not overlap on first render
+### Requirement: Nodes are placed in an edge-aware star-schema layout on first render
 
-The graph SHALL place nodes at initial positions that account for each node's estimated
-rendered width AND height, so that no two nodes overlap when a model is first shown in any
-layer (semantic-model, ontology, or unified). This applies to variable-size nodes (dataset and
-concept nodes rendered expanded with their field/attribute rows, whose height is NOT capped —
-a 50-field node is placed as the tall node it is) as well as fixed-size nodes (metrics, ghost
-concepts). Nodes are packed left-to-right into shelf rows that wrap, and each row clears the
-tallest node of the row above it.
+The graph SHALL place nodes at initial positions computed from the graph's edges so that
+connected nodes are drawn near each other and connection lines avoid crossing. The layout
+SHALL select the most-connected node(s) as hub(s) and position each hub's directly connected
+neighbours radially around it (a star / hub-and-spoke arrangement), placing remaining nodes
+near the hub they connect to. Placement SHALL account for each node's estimated rendered width
+AND height (uncapped — a 50-field node is placed as the tall node it is) so that no two nodes
+overlap when a model is first shown in any layer (semantic-model, ontology, or unified). Nodes
+with no edges SHALL be placed in a tidy grid clear of the connected clusters rather than mixed
+into the rings.
 
-#### Scenario: Expanded nodes are spaced by their width and height
+#### Scenario: Connected nodes are placed around their hub without overlap
 
-- **WHEN** a model with multiple datasets or concepts is first rendered and the nodes are
-  shown expanded with their field/attribute lists, including one node far taller than the rest
-- **THEN** each node is positioned so its bounding box does not intersect any other node's
-  bounding box, horizontally or vertically
+- **WHEN** a model whose nodes are connected by relationships/mappings is first rendered,
+  including one node far taller than the rest
+- **THEN** each hub's directly connected neighbours are arranged around it, and every node is
+  positioned so its bounding box does not intersect any other node's bounding box
+
+#### Scenario: Connection lines do not cross when a hub fans out to its neighbours
+
+- **WHEN** a hub node is connected to several neighbour nodes and the graph is first rendered
+- **THEN** the neighbours are distributed around the hub so their connection lines radiate
+  outward without crossing one another or cutting through other nodes
 
 #### Scenario: Metrics and ghost concepts do not collide with content nodes
 
@@ -29,18 +37,19 @@ tallest node of the row above it.
 ### Requirement: Manual arrange using measured node sizes
 
 The graph SHALL provide an on-canvas "Arrange" control in every layer that repositions all
-nodes into a non-overlapping layout computed from each node's REAL measured size (not an
-estimate). The same measured arrange SHALL also run automatically once per layer, the first
-time that layer's nodes have been measured, so the initial view is clean without user action.
-After that automatic pass the layout SHALL NOT be recomputed on its own — re-running it is the
-user's explicit choice via the control.
+nodes into the edge-aware star-schema layout computed from each node's REAL measured size (not
+an estimate) and the layer's edges, minimizing edge crossings while keeping nodes
+non-overlapping. The same measured arrange SHALL also run automatically once per layer, the
+first time that layer's nodes have been measured, so the initial view is clean without user
+action. After that automatic pass the layout SHALL NOT be recomputed on its own — re-running it
+is the user's explicit choice via the control.
 
 #### Scenario: User triggers a re-arrange
 
 - **WHEN** the user clicks the "Arrange" control after nodes have been added, expanded, or
   dragged into an overlapping mess
-- **THEN** every node is repositioned so no two nodes overlap, using their current rendered
-  sizes, and the view reframes to fit them
+- **THEN** every node is repositioned into the star-schema layout so no two nodes overlap,
+  using their current rendered sizes, and the view reframes to fit them
 
 #### Scenario: Automatic first-time arrange does not fight the user
 
@@ -61,17 +70,20 @@ position before a model change or layer switch, SHALL keep that position.
 - **THEN** the node stays at the user-chosen position and only newly appearing nodes receive a
   computed initial position
 
-### Requirement: Unified view keeps element kinds in separated bands
+### Requirement: Unified view keeps domains spatially grouped
 
-In the unified layer the graph SHALL keep concepts, datasets, and metrics in visually
-separated horizontal bands, and the band boundaries SHALL flex with node height so that a tall
-node in one band does not overlap nodes in an adjacent band.
+In the unified layer the graph SHALL keep each domain's nodes clustered so that concepts remain
+spatially grouped apart from datasets and metrics, and the domain clusters SHALL NOT overlap —
+so the "Ontology" and "Semantic model" background region boxes drawn behind them do not
+intersect — even while nodes within a domain are arranged in the star-schema layout and even
+when a domain contains tall nodes.
 
-#### Scenario: Bands stay clear when a band contains tall nodes
+#### Scenario: Domain clusters stay clear of each other
 
-- **WHEN** the unified view renders concepts with many attributes above datasets with many
-  fields above metrics
-- **THEN** the concept band, dataset band, and metric band do not overlap each other
+- **WHEN** the unified view renders concepts together with datasets and metrics, including
+  nodes with many attributes or fields
+- **THEN** the concept cluster does not overlap the dataset/metric cluster, and their domain
+  region boxes remain visually separated
 
 ### Requirement: Element kinds are color-coded
 

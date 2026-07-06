@@ -172,6 +172,539 @@ export function gridPosition(index: number): XYPosition {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Edge-aware star-schema layout
+// ---------------------------------------------------------------------------
+
+/** An undirected layout edge between two node ids (direction is ignored for placement). */
+export interface LayoutEdge {
+  source: string;
+  target: string;
+}
+
+/** Tunables for {@link starLayout} / {@link starLayoutGrouped}. */
+export interface StarLayoutOptions {
+  originX?: number;
+  originY?: number;
+  /** Minimum gap kept between any two node bounding circles. */
+  gap?: number;
+  /** Gap between packed component / cluster bounding boxes. */
+  componentGutter?: number;
+  /** Vertical gap between stacked domain groups in {@link starLayoutGrouped}. */
+  groupGutter?: number;
+  /**
+   * Optional per-node desired horizontal position (typically the x of a node's
+   * partner in an already-placed band). Freely-orderable nodes (edgeless grids)
+   * and whole clusters are ordered left-to-right by this hint to reduce edge
+   * crossings between stacked domain groups. Nodes without a hint sort last.
+   */
+  orderHint?: Map<string, number>;
+}
+
+/** Minimum clearance between two node bounding circles in the star layout. */
+const STAR_GAP = 56;
+/** Gap between packed cluster/component bounding boxes. */
+const STAR_COMPONENT_GUTTER = 140;
+/** Vertical gap between stacked domain groups. */
+const STAR_GROUP_GUTTER = 220;
+/** Width the cluster-packing row fills before wrapping to a new row of clusters. */
+const STAR_ROW_WIDTH = 2400;
+
+/** Bounding-circle radius of a box (half its diagonal): a size-agnostic overlap proxy. */
+function boundingRadius(width: number, height: number): number {
+  return Math.hypot(width, height) / 2;
+}
+
+/** Stable ascending id comparator for deterministic ordering. */
+const byId = (a: string, b: string): number => a.localeCompare(b);
+
+/**
+ * Order ids left-to-right by a positional hint (a partner node's x). Ids without a
+ * hint sort last; ties break by id so the result stays deterministic.
+ */
+function sortByHint(ids: string[], hint: Map<string, number>): string[] {
+  return [...ids].sort((a, b) => {
+    const ha = hint.get(a) ?? Number.POSITIVE_INFINITY;
+    const hb = hint.get(b) ?? Number.POSITIVE_INFINITY;
+    return ha - hb || byId(a, b);
+  });
+}
+
+/**
+ * Undirected adjacency restricted to the given node ids. Self-loops and edges to
+ * ids outside the set are dropped so the layout never references a missing node.
+ */
+export function buildAdjacency(ids: Set<string>, edges: LayoutEdge[]): Map<string, Set<string>> {
+  const adj = new Map<string, Set<string>>();
+  for (const id of ids) adj.set(id, new Set());
+  for (const e of edges) {
+    if (e.source === e.target) continue;
+    if (!ids.has(e.source) || !ids.has(e.target)) continue;
+    adj.get(e.source)!.add(e.target);
+    adj.get(e.target)!.add(e.source);
+  }
+  return adj;
+}
+
+/**
+ * Partition ids into connected components. Deterministic: components and the ids
+ * within each are returned in sorted order so the layout is reproducible.
+ */
+export function connectedComponents(ids: string[], adj: Map<string, Set<string>>): string[][] {
+  const seen = new Set<string>();
+  const comps: string[][] = [];
+  for (const start of [...ids].sort(byId)) {
+    if (seen.has(start)) continue;
+    const comp: string[] = [];
+    const stack = [start];
+    seen.add(start);
+    while (stack.length) {
+      const n = stack.pop()!;
+      comp.push(n);
+      for (const m of [...(adj.get(n) ?? [])].sort(byId)) {
+        if (!seen.has(m)) {
+          seen.add(m);
+          stack.push(m);
+        }
+      }
+    }
+    comps.push([...comp].sort(byId));
+  }
+  return comps;
+}
+
+/**
+ * Choose the hub(s) of a connected component by degree. The highest-degree node
+ * is always a hub (the "fact table" of a star schema). Additional local-maxima
+ * hubs are detected for multi-fact graphs: a node with degree ≥ 3, at least 60%
+ * of the component's max degree, and no neighbour of higher degree. Ties break by
+ * degree then id for determinism.
+ */
+export function selectHubs(comp: string[], adj: Map<string, Set<string>>): string[] {
+  if (comp.length === 0) return [];
+  const deg = (id: string) => adj.get(id)?.size ?? 0;
+  const byRank = (a: string, b: string) => deg(b) - deg(a) || byId(a, b);
+  const maxDeg = Math.max(...comp.map(deg));
+  const hubs = new Set<string>([[...comp].sort(byRank)[0]!]);
+  for (const id of [...comp].sort(byId)) {
+    const d = deg(id);
+    if (d < 3 || d < maxDeg * 0.6) continue;
+    if ([...(adj.get(id) ?? [])].every((m) => deg(m) <= d)) hubs.add(id);
+  }
+  return [...hubs].sort(byRank);
+}
+
+/**
+ * Assign every node of a multi-hub component to its nearest hub via multi-source
+ * BFS (ties resolved by hub rank order, then by sorted traversal). Returns one
+ * member list per hub, each including the hub itself.
+ */
+function partitionByHubs(
+  comp: string[],
+  hubs: string[],
+  adj: Map<string, Set<string>>,
+): Map<string, string[]> {
+  const owner = new Map<string, string>();
+  const queue: string[] = [];
+  for (const h of hubs) {
+    owner.set(h, h);
+    queue.push(h);
+  }
+  for (const n of queue) {
+    for (const m of [...(adj.get(n) ?? [])].sort(byId)) {
+      if (!owner.has(m)) {
+        owner.set(m, owner.get(n)!);
+        queue.push(m);
+      }
+    }
+  }
+  const groups = new Map<string, string[]>();
+  for (const h of hubs) groups.set(h, []);
+  for (const id of [...comp].sort(byId)) groups.get(owner.get(id) ?? hubs[0]!)!.push(id);
+  return groups;
+}
+
+/**
+ * Build an adjacency map among a hub's direct neighbours: two neighbours are
+ * linked when they connect to each other or share a deeper node (so mutually
+ * related neighbours can be ordered adjacently to reduce edge crossings).
+ */
+function neighbourAdjacency(
+  kids: string[],
+  adj: Map<string, Set<string>>,
+): Map<string, Set<string>> {
+  const kidSet = new Set(kids);
+  const kadj = new Map<string, Set<string>>(kids.map((k) => [k, new Set<string>()]));
+  const link = (a: string, b: string) => {
+    if (a !== b && kidSet.has(a) && kidSet.has(b)) {
+      kadj.get(a)!.add(b);
+      kadj.get(b)!.add(a);
+    }
+  };
+  for (const k of kids) {
+    for (const m of adj.get(k) ?? []) {
+      if (kidSet.has(m)) link(k, m);
+      else for (const k2 of adj.get(m) ?? []) link(k, k2);
+    }
+  }
+  return kadj;
+}
+
+/** DFS ordering over a neighbour-adjacency so linked neighbours sit adjacently. */
+function crossingAwareOrder(kids: string[], kadj: Map<string, Set<string>>): string[] {
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const start of [...kids].sort(byId)) {
+    if (seen.has(start)) continue;
+    const stack = [start];
+    while (stack.length) {
+      const n = stack.pop()!;
+      if (seen.has(n)) continue;
+      seen.add(n);
+      order.push(n);
+      for (const m of [...(kadj.get(n) ?? [])].sort(byId).reverse()) {
+        if (!seen.has(m)) stack.push(m);
+      }
+    }
+  }
+  return order;
+}
+
+/** A node centre plus the size needed to derive its bounding box. */
+interface Cluster {
+  centres: Map<string, XYPosition>;
+  minX: number;
+  minY: number;
+  width: number;
+  height: number;
+}
+
+/** Bounding box of a set of node centres, using each node's own size. */
+function clusterBounds(
+  centres: Map<string, XYPosition>,
+  boxById: Map<string, LayoutBox>,
+): Cluster {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [id, c] of centres) {
+    const b = boxById.get(id)!;
+    minX = Math.min(minX, c.x - b.width / 2);
+    minY = Math.min(minY, c.y - b.height / 2);
+    maxX = Math.max(maxX, c.x + b.width / 2);
+    maxY = Math.max(maxY, c.y + b.height / 2);
+  }
+  return { centres, minX, minY, width: maxX - minX, height: maxY - minY };
+}
+
+/**
+ * Radial-tree layout of one connected component around its hub. Returns each
+ * node's CENTRE in a hub-centred local frame. Guarantees no two bounding circles
+ * overlap: nodes on the same ring are angularly spaced by their footprints, and
+ * nodes on different rings are separated radially by their sizes plus the gap.
+ */
+function layoutStarCluster(
+  members: string[],
+  hub: string,
+  adj: Map<string, Set<string>>,
+  boxById: Map<string, LayoutBox>,
+  gap: number,
+): Map<string, XYPosition> {
+  const memberSet = new Set(members);
+  const depth = new Map<string, number>([[hub, 0]]);
+  const children = new Map<string, string[]>(members.map((m) => [m, []]));
+  const queue = [hub];
+  for (const n of queue) {
+    for (const m of [...(adj.get(n) ?? [])].filter((x) => memberSet.has(x)).sort(byId)) {
+      if (!depth.has(m)) {
+        depth.set(m, depth.get(n)! + 1);
+        children.get(n)!.push(m);
+        queue.push(m);
+      }
+    }
+  }
+
+  const maxDepth = Math.max(...members.map((m) => depth.get(m) ?? 0));
+  const rOf = (id: string) => {
+    const b = boxById.get(id)!;
+    return boundingRadius(b.width, b.height);
+  };
+  // Max bounding radius at each depth, and the base ring radius per depth.
+  const levelR: number[] = [];
+  for (let l = 0; l <= maxDepth; l++) {
+    const at = members.filter((m) => depth.get(m) === l);
+    levelR[l] = at.length ? Math.max(...at.map(rOf)) : 0;
+  }
+  const baseRadius: number[] = [0];
+  for (let l = 1; l <= maxDepth; l++) {
+    baseRadius[l] = baseRadius[l - 1]! + levelR[l - 1]! + levelR[l]! + gap;
+  }
+
+  // Order the hub's direct neighbours so ones that connect to each other (or share
+  // a deeper node) sit adjacently on the ring, reducing inter-neighbour crossings.
+  const hubKids = children.get(hub)!;
+  children.set(hub, crossingAwareOrder(hubKids, neighbourAdjacency(hubKids, adj)));
+  for (const m of members) if (m !== hub) children.set(m, [...children.get(m)!].sort(byId));
+
+  // Angular demand of a subtree at a given radial scale: the wider of the node's
+  // own angular footprint and the sum of its children's demands.
+  const demandFor = (id: string, scale: number): number => {
+    const d = depth.get(id)!;
+    const R = baseRadius[d]! * scale;
+    const own = R > 0 ? 2 * Math.asin(Math.min(0.999, (rOf(id) + gap / 2) / R)) : 0;
+    let sum = 0;
+    for (const k of children.get(id)!) sum += demandFor(k, scale);
+    return Math.max(own, sum);
+  };
+  const hubDemand = (scale: number) =>
+    children.get(hub)!.reduce((a, k) => a + demandFor(k, scale), 0);
+
+  // Grow the radial scale until every level-1 subtree fits within the full circle.
+  let scale = 1;
+  const limit = 2 * Math.PI * 0.95;
+  for (let i = 0; i < 60 && hubDemand(scale) > limit; i++) scale *= 1.15;
+
+  const centres = new Map<string, XYPosition>([[hub, { x: 0, y: 0 }]]);
+  const place = (id: string, lo: number, hi: number): void => {
+    const d = depth.get(id)!;
+    if (d > 0) {
+      const R = baseRadius[d]! * scale;
+      const angle = (lo + hi) / 2;
+      centres.set(id, { x: R * Math.cos(angle), y: R * Math.sin(angle) });
+    }
+    const kids = children.get(id)!;
+    if (kids.length === 0) return;
+    const demands = kids.map((k) => demandFor(k, scale));
+    const slack = Math.max(0, hi - lo - demands.reduce((a, b) => a + b, 0));
+    // Spread the hub's ring evenly around the full circle; keep deeper subtrees
+    // compact and centred within their parent's wedge.
+    const between = id === hub && kids.length > 0 ? slack / kids.length : 0;
+    let cursor = lo + (id === hub ? between / 2 : slack / 2);
+    kids.forEach((k, i) => {
+      place(k, cursor, cursor + demands[i]!);
+      cursor += demands[i]! + between;
+    });
+  };
+  place(hub, 0, 2 * Math.PI);
+  return centres;
+}
+
+/** Lay edgeless nodes into a compact near-square grid; returns their centres. */
+function gridClusterCentres(
+  ids: string[],
+  boxById: Map<string, LayoutBox>,
+  gap: number,
+): Map<string, XYPosition> {
+  const boxes: LayoutBox[] = ids.map((id) => {
+    const b = boxById.get(id)!;
+    return { id, width: b.width, height: b.height, band: 0 };
+  });
+  const widest = boxes.reduce((max, b) => Math.max(max, b.width), 0);
+  const columns = Math.max(1, Math.ceil(Math.sqrt(boxes.length)));
+  const topLeft = arrangeBoxes(boxes, {
+    originX: 0,
+    originY: 0,
+    hGutter: gap,
+    vGutter: gap,
+    maxRowWidth: columns * (widest + gap),
+  });
+  const centres = new Map<string, XYPosition>();
+  for (const b of boxes) {
+    const p = topLeft.get(b.id)!;
+    centres.set(b.id, { x: p.x + b.width / 2, y: p.y + b.height / 2 });
+  }
+  return centres;
+}
+
+/** Lay out a flat box set (single domain) and report the resulting bounding size. */
+function layoutBoxSet(
+  boxes: LayoutBox[],
+  edges: LayoutEdge[],
+  options: StarLayoutOptions,
+): { positions: Map<string, XYPosition>; width: number; height: number } {
+  const originX = options.originX ?? LAYOUT_ORIGIN;
+  const originY = options.originY ?? LAYOUT_ORIGIN;
+  const gap = options.gap ?? STAR_GAP;
+  const componentGutter = options.componentGutter ?? STAR_COMPONENT_GUTTER;
+  const orderHint = options.orderHint;
+  const boxById = new Map(boxes.map((b) => [b.id, b]));
+  const ids = boxes.map((b) => b.id);
+  const adj = buildAdjacency(new Set(ids), edges);
+
+  const clusters: Cluster[] = [];
+  const edgeless: string[] = [];
+  for (const comp of connectedComponents(ids, adj)) {
+    if (comp.length === 1 && (adj.get(comp[0]!)?.size ?? 0) === 0) {
+      edgeless.push(comp[0]!);
+      continue;
+    }
+    const hubs = selectHubs(comp, adj);
+    const groups =
+      hubs.length > 1 ? partitionByHubs(comp, hubs, adj) : new Map([[hubs[0]!, comp]]);
+    for (const [hub, membersOfHub] of groups) {
+      if (membersOfHub.length === 0) continue;
+      clusters.push(clusterBounds(layoutStarCluster(membersOfHub, hub, adj, boxById, gap), boxById));
+    }
+  }
+  // Isolated nodes tuck into their own grid cluster, kept clear of the stars.
+  // When aligning to another band, order them by their partner's position.
+  if (edgeless.length > 0) {
+    const orderedEdgeless = orderHint ? sortByHint(edgeless, orderHint) : edgeless;
+    clusters.push(clusterBounds(gridClusterCentres(orderedEdgeless, boxById, gap), boxById));
+  }
+
+  // Order clusters left-to-right by their partners' positions to reduce the
+  // number of crossing edges between this band and the one it aligns to.
+  if (orderHint) {
+    const clusterHint = (c: Cluster): number => {
+      const xs = [...c.centres.keys()]
+        .map((id) => orderHint.get(id))
+        .filter((v): v is number => v !== undefined);
+      return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : Number.POSITIVE_INFINITY;
+    };
+    clusters.sort((a, b) => clusterHint(a) - clusterHint(b));
+  }
+
+  // Pack the cluster bounding boxes apart so no two clusters overlap.
+  const packBoxes: LayoutBox[] = clusters.map((c, i) => ({
+    id: String(i),
+    width: c.width,
+    height: c.height,
+    band: 0,
+  }));
+  const packed = arrangeBoxes(packBoxes, {
+    originX,
+    originY,
+    hGutter: componentGutter,
+    vGutter: componentGutter,
+    maxRowWidth: STAR_ROW_WIDTH,
+  });
+
+  const positions = new Map<string, XYPosition>();
+  let maxX = originX;
+  let maxY = originY;
+  clusters.forEach((c, i) => {
+    const at = packed.get(String(i))!;
+    for (const [id, centre] of c.centres) {
+      const b = boxById.get(id)!;
+      const x = at.x + (centre.x - b.width / 2 - c.minX);
+      const y = at.y + (centre.y - b.height / 2 - c.minY);
+      positions.set(id, { x, y });
+      maxX = Math.max(maxX, x + b.width);
+      maxY = Math.max(maxY, y + b.height);
+    }
+  });
+  return { positions, width: maxX - originX, height: maxY - originY };
+}
+
+/**
+ * Edge-aware star-schema layout. Places each connected component around its
+ * most-connected hub node, fanning the hub's neighbours out on a size-derived ring
+ * (with second-degree nodes hanging off their parent in the same wedge), packs
+ * separate components apart, and tucks edgeless nodes into a side grid. Guarantees
+ * no two node bounding boxes overlap for any mix of sizes. Deterministic.
+ */
+export function starLayout(
+  boxes: LayoutBox[],
+  edges: LayoutEdge[],
+  options: StarLayoutOptions = {},
+): Map<string, XYPosition> {
+  return layoutBoxSet(boxes, edges, options).positions;
+}
+
+/**
+ * Domain-aware star layout: lay out each band (domain) as its own star cluster and
+ * stack the bands vertically so their bounding boxes never overlap. Used by the
+ * unified view to keep the ontology and semantic-model clusters (and their region
+ * boxes) spatially separated while each is arranged as a star.
+ */
+export function starLayoutGrouped(
+  boxes: LayoutBox[],
+  edges: LayoutEdge[],
+  options: StarLayoutOptions = {},
+): Map<string, XYPosition> {
+  const originX = options.originX ?? LAYOUT_ORIGIN;
+  let originY = options.originY ?? LAYOUT_ORIGIN;
+  const groupGutter = options.groupGutter ?? STAR_GROUP_GUTTER;
+  const positions = new Map<string, XYPosition>();
+  // x of every node already placed in an earlier band, used to align later bands.
+  const priorX = new Map<string, number>();
+  const bands = [...new Set(boxes.map((b) => b.band))].sort((a, b) => a - b);
+  for (const band of bands) {
+    const groupBoxes = boxes.filter((b) => b.band === band);
+    if (groupBoxes.length === 0) continue;
+    // Build a positional hint: for each node in this band, the mean x of its
+    // partners already placed in earlier bands. Later bands are then ordered to
+    // sit above/below their partners, minimising cross-layer edge crossings.
+    const idSet = new Set(groupBoxes.map((b) => b.id));
+    const partners = new Map<string, number[]>();
+    for (const e of edges) {
+      const inBand = idSet.has(e.source) ? e.source : idSet.has(e.target) ? e.target : undefined;
+      if (inBand === undefined) continue;
+      const other = inBand === e.source ? e.target : e.source;
+      const ox = priorX.get(other);
+      if (ox === undefined) continue;
+      (partners.get(inBand) ?? partners.set(inBand, []).get(inBand)!).push(ox);
+    }
+    const hint = new Map<string, number>();
+    for (const [id, xs] of partners) hint.set(id, xs.reduce((a, b) => a + b, 0) / xs.length);
+    const { positions: gp, height } = layoutBoxSet(groupBoxes, edges, {
+      ...options,
+      originX,
+      originY,
+      orderHint: hint.size > 0 ? hint : undefined,
+    });
+    for (const [id, p] of gp) {
+      positions.set(id, p);
+      priorX.set(id, p.x);
+    }
+    originY += height + groupGutter;
+  }
+  return positions;
+}
+
+/**
+ * Estimate box sizes for each item and {@link starLayout} them using the given
+ * edges. The pre-measurement counterpart of the measured "Arrange" action.
+ */
+export function layoutEstimatedStar(
+  items: EstimatedItem[],
+  edges: LayoutEdge[],
+  options: StarLayoutOptions = {},
+): Map<string, XYPosition> {
+  const boxes: LayoutBox[] = items.map((item) => ({
+    id: item.id,
+    width: estimateNodeWidth(item.texts ?? []),
+    height: estimateNodeHeight(item.rows ?? 0),
+    band: 0,
+  }));
+  return starLayout(boxes, edges, options);
+}
+
+/**
+ * Estimate box sizes for each band's items and {@link starLayoutGrouped} them, so
+ * the unified estimated layout keeps its domains separated (one band per domain).
+ */
+export function layoutEstimatedStarGrouped(
+  bands: EstimatedItem[][],
+  edges: LayoutEdge[],
+  options: StarLayoutOptions = {},
+): Map<string, XYPosition> {
+  const boxes: LayoutBox[] = [];
+  bands.forEach((items, band) => {
+    for (const item of items) {
+      boxes.push({
+        id: item.id,
+        width: estimateNodeWidth(item.texts ?? []),
+        height: estimateNodeHeight(item.rows ?? 0),
+        band,
+      });
+    }
+  });
+  return starLayoutGrouped(boxes, edges, options);
+}
+
 /** A positioned, sized node grouped under a domain, for region-box computation. */
 export interface DomainNodeBounds {
   /** Domain the node belongs to (e.g. `ontology` / `semantic`). */
