@@ -1,0 +1,44 @@
+version: "1.0.0"
+schemaVersion: "3.0.1"
+identifier: "b3d1f2a0-1c2d-4e5f-8a9b-0c1d2e3f4a5b"
+name: "Customer Orders"
+dataOwner: "data.team@example.com"
+originApplication: "OrderPlatform"
+description: "Core customer and order data for the retail domain."
+responsibilities:
+  - role: "Data Steward"
+    party: "jane.doe@example.com"
+tags:
+  - "retail"
+  - "core"
+entities:
+  customer:
+    displayName: "Customer"
+    description: "A person or organization that places orders."
+    classification: "Confidential"
+    tags:
+      - "pii"
+    attributes:
+      customerId:
+        displayName: "Customer ID"
+        description: "Unique identifier for the customer."
+        example: "CUST-00123"
+      emailAddress:
+        displayName: "Email Address"
+        description: "Primary contact email."
+        example: "jane.doe@example.com"
+        additionalInformation: "Validated at signup."
+  order:
+    displayName: "Order"
+    description: "A purchase placed by a customer."
+    attributes:
+      orderId:
+        displayName: "Order ID"
+        example: "ORD-98765"
+      status:
+        displayName: "Order Status"
+        description: "Current state of the order."
+        predefinedValues:
+          - "PENDING"
+          - "SHIPPED"
+          - "DELIVERED"

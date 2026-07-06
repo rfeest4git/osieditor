@@ -75,6 +75,56 @@ describe('POST /api/import', () => {
   });
 });
 
+describe('POST /api/import-data-asset', () => {
+  const dataAsset = {
+    schemaVersion: '3.0.1',
+    name: 'Customer Orders',
+    description: 'Retail data.',
+    identifier: 'id-123',
+    entities: {
+      customer: {
+        displayName: 'Customer',
+        description: 'A buyer.',
+        attributes: {
+          customerId: { displayName: 'Customer ID', example: 'CUST-1' },
+        },
+      },
+    },
+  };
+
+  it('converts a valid DataAsset into an ontology document', async () => {
+    const res = await post('/api/import-data-asset', {
+      text: JSON.stringify(dataAsset),
+      filename: 'customer.json',
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.kind).toBe('ontology');
+    expect(body.document.name).toBe('Customer Orders');
+    expect(body.document.ontology.some((c: { concept: { name: string } }) => c.concept.name === 'Customer')).toBe(true);
+    expect(body.diagnostics).toEqual([]);
+  });
+
+  it('returns 422 with a parse error on malformed input', async () => {
+    const res = await post('/api/import-data-asset', { text: '{not valid', filename: 'x.json' });
+    expect(res.status).toBe(422);
+    const body = await res.json();
+    expect(body.parseError.format).toBe('json');
+    expect(body.document).toBeUndefined();
+  });
+
+  it('rejects a non-DataAsset document as unsupported', async () => {
+    const res = await post('/api/import-data-asset', {
+      text: JSON.stringify(validModel),
+      filename: 'sales.json',
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.unsupported.kind).toBe('unknown');
+    expect(body.document).toBeUndefined();
+  });
+});
+
 describe('POST /api/export', () => {
   it('exports as JSON with download headers', async () => {
     const res = await post('/api/export', { model: validModel, format: 'json' });

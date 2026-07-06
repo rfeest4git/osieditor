@@ -1,11 +1,15 @@
 import { detectFormat, parse, ParseError, type OsiFormat } from './io.js';
 import {
+  DataAssetSchema,
   DraftDocumentSchema,
   DraftOntologyDocumentSchema,
+  detectDataAsset,
   detectDocumentKind,
   type AnyOsiDocument,
+  type DataAsset,
   type OsiDocumentKind,
 } from './model.js';
+import { dataAssetToOntology } from './dataAsset.js';
 import { validate, type Diagnostic } from './validation.js';
 
 export interface ImportResult {
@@ -88,4 +92,67 @@ export function importText(text: string, filename?: string, format?: OsiFormat):
     ...(kind ? { kind } : {}),
     ...(unsupported ? { unsupported } : {}),
   };
+}
+
+/**
+ * Map Zod issues from a `DataAssetSchema` check into `Diagnostic`s so missing
+ * required DataAsset fields (e.g. an entity's `displayName`) surface with the
+ * same "load anyway / cancel" UX as OSI import validation errors.
+ */
+function dataAssetDiagnostics(raw: unknown): Diagnostic[] {
+  const result = DataAssetSchema.safeParse(raw);
+  if (result.success) return [];
+  return result.error.issues.map((issue) => {
+    const isMissing =
+      issue.code === 'invalid_type' &&
+      (issue as { received?: unknown }).received === 'undefined';
+    const fieldName = issue.path.length ? String(issue.path.at(-1)) : 'value';
+    return {
+      severity: 'error' as const,
+      code: isMissing ? 'required_field' : `schema_${issue.code}`,
+      message: isMissing ? `Missing required field "${fieldName}".` : issue.message,
+      path: [...issue.path],
+    };
+  });
+}
+
+/**
+ * Parse a Collibra DataAsset document and convert it one-way into an OSI ontology
+ * document. Mirrors `importText`'s contract: a parse failure returns
+ * `{ parseError, ... }` without throwing; a non-DataAsset root returns
+ * `{ unsupported, ... }` and no document; otherwise the converted ontology is
+ * returned with any DataAsset/ontology validation diagnostics so callers can
+ * offer "load anyway / cancel".
+ */
+export function importDataAssetText(
+  text: string,
+  filename?: string,
+  format?: OsiFormat,
+): ImportResult {
+  const fmt = format ?? detectFormat(filename, text);
+  let raw: unknown;
+  try {
+    raw = parse(text, fmt);
+  } catch (err) {
+    if (err instanceof ParseError) {
+      return { format: fmt, diagnostics: [], parseError: { message: err.message, format: fmt } };
+    }
+    throw err;
+  }
+
+  if (!detectDataAsset(raw)) {
+    return {
+      format: fmt,
+      diagnostics: [],
+      unsupported: {
+        kind: 'unknown',
+        message:
+          'This file is not a Collibra DataAsset. A DataAsset has a top-level "entities" map and a "schemaVersion".',
+      },
+    };
+  }
+
+  const document = dataAssetToOntology(raw as DataAsset);
+  const diagnostics = [...dataAssetDiagnostics(raw), ...validate(document)];
+  return { format: fmt, kind: 'ontology', document, diagnostics };
 }

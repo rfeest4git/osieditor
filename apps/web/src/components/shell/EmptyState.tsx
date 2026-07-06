@@ -1,5 +1,6 @@
 import { PHeading, PText } from '@porsche-design-system/components-react';
 import { ImportButton } from '../io/ImportButton.js';
+import { ImportDataAssetButton } from '../io/ImportDataAssetButton.js';
 import { NewModelButton } from '../io/NewModelButton.js';
 import { NewOntologyButton } from '../io/NewOntologyButton.js';
 
@@ -23,6 +24,7 @@ export function EmptyState() {
           <NewModelButton variant="primary">New model</NewModelButton>
           <NewOntologyButton variant="secondary">New ontology</NewOntologyButton>
           <ImportButton variant="secondary">Import file</ImportButton>
+          <ImportDataAssetButton variant="secondary">Import Data Asset</ImportDataAssetButton>
         </div>
       </div>
     </div>

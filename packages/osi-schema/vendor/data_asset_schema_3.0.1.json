@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://collibra.com/schemas/data_asset_schema_3.0.1.json",
+  "title": "Collibra DataAsset",
+  "description": "A Collibra DataAsset definition: a business data asset described by entities and their attributes. Vendored as the input shape for the OSI editor's one-way DataAsset -> ontology conversion.",
+  "type": "object",
+  "required": ["schemaVersion", "entities"],
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Version of this DataAsset document."
+    },
+    "schemaVersion": {
+      "type": "string",
+      "description": "Version of the DataAsset schema this document conforms to (e.g. 3.0.1)."
+    },
+    "identifier": {
+      "type": "string",
+      "description": "Stable identifier (e.g. UUID) of the DataAsset."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable name of the DataAsset."
+    },
+    "dataOwner": {
+      "type": "string",
+      "description": "Owner of the DataAsset (person, team, or email)."
+    },
+    "originApplication": {
+      "type": "string",
+      "description": "System or application the DataAsset originates from."
+    },
+    "description": {
+      "type": "string",
+      "description": "Free-text description of the DataAsset."
+    },
+    "responsibilities": {
+      "description": "Stewardship/responsibility assignments, keyed by responsibility type (e.g. dataManagementExpert) to a list of parties.",
+      "type": "object"
+    },
+    "tags": {
+      "type": "array",
+      "description": "Free-form tags applied to the DataAsset.",
+      "items": { "type": "string" }
+    },
+    "entities": {
+      "type": "object",
+      "description": "Map of entity key -> entity definition.",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["displayName"],
+        "properties": {
+          "displayName": {
+            "type": "string",
+            "description": "Human-readable name of the entity."
+          },
+          "description": {
+            "type": "string",
+            "description": "Free-text description of the entity."
+          },
+          "classification": {
+            "description": "Data classification. An object in DataAsset 3.x (e.g. securityClassification + containsPersonallyIdentifiableInformation); may be a plain string in simpler assets."
+          },
+          "tags": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "attributes": {
+            "type": "object",
+            "description": "Map of attribute key -> attribute definition.",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["displayName"],
+              "properties": {
+                "displayName": {
+                  "type": "string",
+                  "description": "Human-readable name of the attribute."
+                },
+                "description": {
+                  "type": "string",
+                  "description": "Free-text description of the attribute."
+                },
+                "example": {
+                  "description": "Example value for the attribute. May be a string, number, boolean, or date."
+                },
+                "additionalInformation": {
+                  "type": "string",
+                  "description": "Additional notes about the attribute."
+                },
+                "predefinedValues": {
+                  "type": "array",
+                  "description": "Enumerated set of allowed values.",
+                  "items": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

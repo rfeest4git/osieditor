@@ -9,6 +9,21 @@ target version. OSI defines two top-level document kinds and one schema for each
 | `osi-schema.json`      | `core-spec/osi-schema.json`  | Semantic-model document   |
 | `ontology-schema.json` | `ontology/ontology.json`     | Ontology document         |
 
+A third schema is vendored for **import only** (it is not an OSI document kind):
+
+| File                             | Source                       | Document kind             |
+| -------------------------------- | ---------------------------- | ------------------------- |
+| `data_asset_schema_3.0.1.json`   | Collibra DataAsset schema    | DataAsset (import source) |
+
+`data_asset_schema_3.0.1.json` describes the Collibra **DataAsset** shape
+(`schemaVersion` + `entities` map of entities/attributes). The editor converts a
+DataAsset **one-way** into an OSI ontology document (`dataAssetToOntology` in
+`src/dataAsset.ts`); it is never exported. The Zod mirror in
+`src/model.ts` (`DataAssetSchema`) is minimal — it covers only the fields the
+conversion needs and uses `.passthrough()` so unmapped keys survive into a
+`custom_extensions` bag. Full enum/format validation from the DataAsset schema is
+out of scope.
+
 Both are vendored from the same ref/version:
 
 | Field         | Value                                                                 |

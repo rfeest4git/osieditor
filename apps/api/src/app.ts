@@ -2,6 +2,7 @@ import { zValidator } from '@hono/zod-validator';
 import {
   DraftDocumentSchema,
   DraftOntologyDocumentSchema,
+  importDataAssetText,
   importText,
   serialize,
   validate,
@@ -66,6 +67,26 @@ export function createApp() {
   app.post('/api/import', zValidator('json', importRequestSchema), (c) => {
     const { text, filename, format } = c.req.valid('json');
     const result = importText(text, filename, format);
+    if (result.parseError) {
+      return c.json(
+        { format: result.format, parseError: result.parseError, diagnostics: [] },
+        422,
+      );
+    }
+    return c.json({
+      format: result.format,
+      document: result.document,
+      diagnostics: result.diagnostics,
+      ...(result.kind ? { kind: result.kind } : {}),
+      ...(result.unsupported ? { unsupported: result.unsupported } : {}),
+    });
+  });
+
+  // Parse a Collibra DataAsset payload and convert it one-way into an OSI
+  // ontology document. Mirrors /api/import's response contract.
+  app.post('/api/import-data-asset', zValidator('json', importRequestSchema), (c) => {
+    const { text, filename, format } = c.req.valid('json');
+    const result = importDataAssetText(text, filename, format);
     if (result.parseError) {
       return c.json(
         { format: result.format, parseError: result.parseError, diagnostics: [] },

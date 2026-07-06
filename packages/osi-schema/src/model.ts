@@ -389,3 +389,71 @@ export function detectDocumentKind(raw: unknown): OsiDocumentKind | undefined {
   if (Array.isArray(obj.semantic_model)) return 'semantic-model';
   return undefined;
 }
+
+/* -------------------------------------------------------------------------- *
+ * Collibra DataAsset (import source)
+ *
+ * A DataAsset document is a THIRD input shape the editor can ingest — distinct
+ * from the OSI semantic-model and ontology documents above. It is converted
+ * one-way into an OSI ontology document (see `dataAssetToOntology`) and is never
+ * exported. This is a minimal Zod mirror of `vendor/data_asset_schema_3.0.1.json`
+ * covering only the fields the conversion needs; `.passthrough()` keeps every
+ * other DataAsset key so nothing is lost when preserved into `custom_extensions`.
+ * -------------------------------------------------------------------------- */
+
+/** One attribute of a DataAsset entity. Required: `displayName`. */
+export const DataAssetAttributeSchema = z
+  .object({
+    displayName: z.string(),
+    description: z.string().optional(),
+    // Real DataAssets carry example values of mixed types (string, number, date),
+    // so accept any JSON value rather than enforcing a string.
+    example: z.unknown().optional(),
+    additionalInformation: z.string().optional(),
+    predefinedValues: z.array(z.unknown()).optional(),
+  })
+  .passthrough();
+export type DataAssetAttribute = z.infer<typeof DataAssetAttributeSchema>;
+
+/** One entity of a DataAsset, keyed by entity key in the `entities` map. Required: `displayName`. */
+export const DataAssetEntitySchema = z
+  .object({
+    displayName: z.string(),
+    description: z.string().optional(),
+    // `classification` is an object in DataAsset 3.x (security classification +
+    // PII flags); older/simpler assets may use a string. Accept either.
+    classification: z.unknown().optional(),
+    tags: z.array(z.unknown()).optional(),
+    attributes: z.record(z.string(), DataAssetAttributeSchema).optional(),
+  })
+  .passthrough();
+export type DataAssetEntity = z.infer<typeof DataAssetEntitySchema>;
+
+/** Collibra DataAsset document. Required: `schemaVersion`, `entities`. */
+export const DataAssetSchema = z
+  .object({
+    schemaVersion: z.string(),
+    name: z.string().optional(),
+    description: z.string().optional(),
+    entities: z.record(z.string(), DataAssetEntitySchema),
+  })
+  .passthrough();
+export type DataAsset = z.infer<typeof DataAssetSchema>;
+
+/**
+ * Recognize a Collibra DataAsset root by its top-level shape: a non-array object
+ * carrying an `entities` object and a `schemaVersion` string. This is distinct
+ * from OSI documents (which use `semantic_model`/`ontology` arrays), so
+ * misclassification is unlikely.
+ */
+export function detectDataAsset(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const obj = raw as Record<string, unknown>;
+  const entities = obj.entities;
+  return (
+    typeof obj.schemaVersion === 'string' &&
+    typeof entities === 'object' &&
+    entities !== null &&
+    !Array.isArray(entities)
+  );
+}

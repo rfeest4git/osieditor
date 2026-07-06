@@ -28,7 +28,7 @@ export function DatasetNode({ data, selected }: NodeProps) {
   return (
     <div
       // Teal left accent keys datasets to the semantic-model region and colour scheme.
-      className={`min-w-40 rounded border border-l-4 bg-surface text-content shadow-sm ${
+      className={`min-w-40 max-w-[320px] rounded border border-l-4 bg-surface text-content shadow-sm ${
         selected ? 'border-brand' : 'border-border border-l-[#0d9488]'
       }`}
     >
@@ -53,7 +53,7 @@ export function DatasetNode({ data, selected }: NodeProps) {
         )}
       </div>
       {description && (
-        <div className="border-t border-border px-3 py-1.5 text-xs italic text-content/60">
+        <div className="border-t border-border px-3 py-1.5 text-xs italic text-content/60 whitespace-normal break-words">
           {description}
         </div>
       )}

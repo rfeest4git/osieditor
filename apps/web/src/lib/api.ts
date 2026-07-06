@@ -43,6 +43,24 @@ export async function importModel(
   throw new ApiError(`Import failed (${res.status})`, res.status);
 }
 
+/** Import a Collibra DataAsset file text via the API, converting it one-way into
+ * an OSI ontology document. A 422 parse error is returned (not thrown). */
+export async function importDataAsset(
+  text: string,
+  fileName?: string,
+  format?: OsiFormat,
+): Promise<ImportResponse> {
+  const res = await fetch('/api/import-data-asset', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, filename: fileName, format }),
+  });
+  if (res.status === 422 || res.ok) {
+    return (await res.json()) as ImportResponse;
+  }
+  throw new ApiError(`DataAsset import failed (${res.status})`, res.status);
+}
+
 /** Export the model, returning the serialized text and a suggested filename. */
 export async function exportModel(
   model: AnyDraftDocument,
