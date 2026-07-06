@@ -1,6 +1,6 @@
-import { validate } from '@osi-editor/osi-schema';
+import { dataAssetToOntology, validate } from '@osi-editor/osi-schema';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { getActiveModel, useEditorStore } from './editorStore.js';
+import { getActiveModel, getOntologyComponents, useEditorStore } from './editorStore.js';
 
 function model() {
   const state = useEditorStore.getState();
@@ -145,5 +145,34 @@ describe('editor store — ontology documents', () => {
     const doc = useEditorStore.getState().doc as { ontology?: unknown[] };
     expect(doc.ontology?.length).toBe(0);
     expect(useEditorStore.getState().selection).toEqual({ kind: 'ontology' });
+  });
+
+  it('merges a DataAsset into the session, preserving identity and selection', () => {
+    const first = dataAssetToOntology({
+      schemaVersion: '3.0.1',
+      name: 'First',
+      entities: { customer: { displayName: 'Customer', attributes: { email: { displayName: 'Email' } } } },
+    });
+    useEditorStore.getState().loadDocument(first);
+    const loadId = useEditorStore.getState().docLoadId;
+    useEditorStore.getState().select({ kind: 'concept', componentIndex: 0 });
+
+    const second = dataAssetToOntology({
+      schemaVersion: '3.0.1',
+      name: 'Second',
+      entities: { order: { displayName: 'Order', attributes: { total: { displayName: 'Total' } } } },
+    });
+    useEditorStore.getState().mergeOntologyComponents(second);
+
+    const state = useEditorStore.getState();
+    const names = getOntologyComponents(state.doc)
+      .map((c) => c.concept.name)
+      .sort((a, b) => a.localeCompare(b));
+    // Prior entity retained and new entity added.
+    expect(names).toEqual(['Customer', 'Order']);
+    // Selection is preserved and the session identity (docLoadId) is unchanged.
+    expect(state.selection).toEqual({ kind: 'concept', componentIndex: 0 });
+    expect(state.docLoadId).toBe(loadId);
+    expect(state.dirty).toBe(true);
   });
 });

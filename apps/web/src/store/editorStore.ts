@@ -9,6 +9,7 @@ import {
   createOntologyRelationship,
   createRelationship,
   detectDocumentKind,
+  mergeDataAssetOntology,
   validate,
   type AnyDraftDocument,
   type Concept,
@@ -18,6 +19,7 @@ import {
   type Field,
   type Metric,
   type OntologyComponent,
+  type OntologyDocument,
   type OntologyRelationship,
   type OsiDocumentKind,
   type OsiFormat,
@@ -69,6 +71,12 @@ interface EditorState {
   newModel: (name?: string) => void;
   newOntology: (name?: string) => void;
   loadDocument: (doc: AnyDraftDocument, fileName?: string) => void;
+  /**
+   * Merge a converted DataAsset ontology document into the active ontology
+   * document without starting a new session: appends its components/metadata,
+   * marks the doc dirty, and preserves selection/indices and `docLoadId`.
+   */
+  mergeOntologyComponents: (incoming: OntologyDocument) => void;
   markSaved: () => void;
   setPreviewFormat: (format: OsiFormat) => void;
   select: (selection: Selection) => void;
@@ -191,7 +199,7 @@ export function getConceptRelationshipNames(
 }
 
 export const useEditorStore = create<EditorState>()(
-  immer((set) => {
+  immer((set, get) => {
     /** Run a mutation against the active semantic model and flag the doc dirty. */
     const mutateModel = (fn: (model: SemanticModel) => void) =>
       set((state) => {
@@ -280,6 +288,18 @@ export const useEditorStore = create<EditorState>()(
         set((state) => {
           state.dirty = false;
         }),
+
+      mergeOntologyComponents: (incoming) => {
+        const current = get().doc;
+        if (!current || !isOntologyDoc(current)) return;
+        // Merge against a plain snapshot (not an immer draft) so the helper's
+        // spreads/reads produce a clean document, then replace the active doc.
+        const merged = mergeDataAssetOntology(current, incoming);
+        set((state) => {
+          state.doc = merged;
+          state.dirty = true;
+        });
+      },
 
       setPreviewFormat: (format) =>
         set((state) => {

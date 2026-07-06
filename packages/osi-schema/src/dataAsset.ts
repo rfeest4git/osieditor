@@ -158,3 +158,148 @@ export function dataAssetToOntology(dataAsset: DataAsset): OntologyDocument {
     ...(customExtensions ? { custom_extensions: customExtensions } : {}),
   };
 }
+
+/**
+ * Derive a concept name that does not collide with any name in `taken`. Because
+ * `base` already satisfies `^[A-Z][a-zA-Z0-9_-]*$`, appending a `_N` suffix keeps
+ * the result schema-valid. Increments `N` until the name is unique.
+ */
+function uniqueConceptName(base: string, taken: Set<string>): string {
+  if (!taken.has(base)) return base;
+  let n = 2;
+  let candidate = `${base}_${n}`;
+  while (taken.has(candidate)) {
+    n += 1;
+    candidate = `${base}_${n}`;
+  }
+  return candidate;
+}
+
+/**
+ * Return a copy of `component` with its concept renamed and every `verbalizes`
+ * template that references the old concept name (embedded as `{OldName}`)
+ * rewritten to the new name, leaving unrelated text untouched.
+ */
+function renameComponentConcept(
+  component: OntologyComponent,
+  oldName: string,
+  newName: string,
+): OntologyComponent {
+  const oldToken = `{${oldName}}`;
+  const newToken = `{${newName}}`;
+  return {
+    ...component,
+    concept: { ...component.concept, name: newName },
+    ...(component.relationships
+      ? {
+          relationships: component.relationships.map((rel) => ({
+            ...rel,
+            ...(rel.verbalizes
+              ? { verbalizes: rel.verbalizes.map((v) => v.split(oldToken).join(newToken)) }
+              : {}),
+          })),
+        }
+      : {}),
+  };
+}
+
+/**
+ * Combine the preserved DataAsset metadata carried in two `collibra-data-asset`
+ * `custom_extensions` bags into a single JSON string. Metadata is namespaced
+ * under a `dataAssets` array so combining is additive and never overwrites
+ * earlier entries. Returns `undefined` when neither bag carries data.
+ */
+function mergeCollibraMetadata(
+  targetData: string | undefined,
+  incomingData: string | undefined,
+): string | undefined {
+  const list: unknown[] = [];
+  const push = (data: string | undefined) => {
+    if (!data) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(data);
+    } catch {
+      return;
+    }
+    if (!parsed || typeof parsed !== 'object') return;
+    const bag = parsed as { dataAssets?: unknown };
+    if (Array.isArray(bag.dataAssets)) {
+      list.push(...bag.dataAssets);
+    } else if (Object.keys(parsed).length) {
+      list.push(parsed);
+    }
+  };
+  push(targetData);
+  push(incomingData);
+  if (!list.length) return undefined;
+  return JSON.stringify({ dataAssets: list });
+}
+
+/**
+ * Combine the `custom_extensions` arrays of two ontology documents: accumulate
+ * the `collibra-data-asset` preserved-metadata bags (see
+ * {@link mergeCollibraMetadata}) and carry through any other vendors' bags from
+ * both documents unchanged.
+ */
+function mergeCustomExtensions(
+  targetExt: CustomExtension[] | undefined,
+  incomingExt: CustomExtension[] | undefined,
+): CustomExtension[] | undefined {
+  const targetBag = targetExt?.find((e) => e.vendor_name === DATA_ASSET_VENDOR);
+  const incomingBag = incomingExt?.find((e) => e.vendor_name === DATA_ASSET_VENDOR);
+  const others = [
+    ...(targetExt ?? []).filter((e) => e.vendor_name !== DATA_ASSET_VENDOR),
+    ...(incomingExt ?? []).filter((e) => e.vendor_name !== DATA_ASSET_VENDOR),
+  ];
+  const mergedData = mergeCollibraMetadata(targetBag?.data, incomingBag?.data);
+  const result: CustomExtension[] = [];
+  if (mergedData !== undefined) {
+    result.push({ vendor_name: DATA_ASSET_VENDOR, data: mergedData });
+  }
+  result.push(...others);
+  return result.length ? result : undefined;
+}
+
+/**
+ * Merge a freshly converted DataAsset ontology (`incoming`) into an existing
+ * ontology document (`target`), returning a new document. The incoming
+ * `OntologyComponent`s are appended to the target's components; when an incoming
+ * concept name collides with a name already present, the incoming concept is
+ * uniquified (`Customer` → `Customer_2`) and its relationship `verbalizes`
+ * templates are rewritten to the new name (the existing concept is left
+ * untouched). Preserved `collibra-data-asset` metadata from both documents is
+ * accumulated so nothing from an earlier import is discarded.
+ */
+export function mergeDataAssetOntology(
+  target: OntologyDocument,
+  incoming: OntologyDocument,
+): OntologyDocument {
+  const targetComponents = target.ontology ?? [];
+  const taken = new Set(targetComponents.map((c) => c.concept.name));
+
+  const appended: OntologyComponent[] = [];
+  for (const component of incoming.ontology ?? []) {
+    const originalName = component.concept.name;
+    const uniqueName = uniqueConceptName(originalName, taken);
+    taken.add(uniqueName);
+    appended.push(
+      uniqueName === originalName
+        ? component
+        : renameComponentConcept(component, originalName, uniqueName),
+    );
+  }
+
+  const mergedExtensions = mergeCustomExtensions(target.custom_extensions, incoming.custom_extensions);
+
+  const result: OntologyDocument = {
+    ...target,
+    ontology: [...targetComponents, ...appended],
+  };
+  if (mergedExtensions) {
+    result.custom_extensions = mergedExtensions;
+  } else {
+    delete result.custom_extensions;
+  }
+  return result;
+}

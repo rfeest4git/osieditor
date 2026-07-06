@@ -1,21 +1,27 @@
 import { PButton } from '@porsche-design-system/components-react';
-import type { AnyDraftDocument } from '@osi-editor/osi-schema';
+import type { OntologyDocument } from '@osi-editor/osi-schema';
 import { useRef, useState } from 'react';
 import { importDataAsset, type ImportResponse } from '../../lib/api.js';
-import { useEditorStore } from '../../store/editorStore.js';
+import { isOntologyDoc, useEditorStore } from '../../store/editorStore.js';
+import { Button } from '../ui/Button.js';
 import { ConfirmDialog } from '../ui/ConfirmDialog.js';
+import { Modal } from '../ui/Modal.js';
 
 interface PendingImport {
   response: ImportResponse;
   fileName: string;
 }
 
+/** Which apply path the user picked when a document was already loaded. */
+type ApplyMode = 'replace' | 'add';
+
 type Stage =
   | { kind: 'idle' }
   | { kind: 'parse-error'; message: string }
   | { kind: 'unsupported'; message: string }
+  | { kind: 'choose-mode'; pending: PendingImport }
   | { kind: 'unsaved-confirm'; pending: PendingImport }
-  | { kind: 'validation-confirm'; pending: PendingImport };
+  | { kind: 'validation-confirm'; pending: PendingImport; mode: ApplyMode };
 
 /**
  * DataAsset import control: opens a file picker for `.json`/`.yaml`/`.yml`, sends
@@ -34,21 +40,36 @@ export function ImportDataAssetButton({
   const inputRef = useRef<HTMLInputElement>(null);
   const [stage, setStage] = useState<Stage>({ kind: 'idle' });
   const loadDocument = useEditorStore((s) => s.loadDocument);
+  const mergeOntologyComponents = useEditorStore((s) => s.mergeOntologyComponents);
+  const doc = useEditorStore((s) => s.doc);
   const dirty = useEditorStore((s) => s.dirty);
 
-  const apply = (pending: PendingImport) => {
+  const apply = (pending: PendingImport, mode: ApplyMode) => {
     if (pending.response.document) {
-      loadDocument(pending.response.document as AnyDraftDocument, pending.fileName);
+      if (mode === 'add') {
+        mergeOntologyComponents(pending.response.document as OntologyDocument);
+      } else {
+        loadDocument(pending.response.document, pending.fileName);
+      }
     }
     setStage({ kind: 'idle' });
   };
 
-  const proceed = (pending: PendingImport) => {
+  const proceed = (pending: PendingImport, mode: ApplyMode) => {
     const errors = pending.response.diagnostics.filter((d) => d.severity === 'error');
     if (errors.length > 0) {
-      setStage({ kind: 'validation-confirm', pending });
+      setStage({ kind: 'validation-confirm', pending, mode });
     } else {
-      apply(pending);
+      apply(pending, mode);
+    }
+  };
+
+  /** Route the "replace" path through the unsaved-changes guard when needed. */
+  const replace = (pending: PendingImport) => {
+    if (dirty) {
+      setStage({ kind: 'unsaved-confirm', pending });
+    } else {
+      proceed(pending, 'replace');
     }
   };
 
@@ -65,10 +86,12 @@ export function ImportDataAssetButton({
       return;
     }
     const pending: PendingImport = { response, fileName: file.name };
-    if (dirty) {
-      setStage({ kind: 'unsaved-confirm', pending });
+    if (isOntologyDoc(doc)) {
+      // A compatible document is loaded — let the user replace it or add to it.
+      setStage({ kind: 'choose-mode', pending });
     } else {
-      proceed(pending);
+      // No ontology document loaded: keep the original replace-only behavior.
+      replace(pending);
     }
   };
 
@@ -136,7 +159,14 @@ export function ImportDataAssetButton({
         confirmLabel="Discard and import"
         cancelLabel="Keep editing"
         destructive
-        onConfirm={() => stage.kind === 'unsaved-confirm' && proceed(stage.pending)}
+        onConfirm={() => stage.kind === 'unsaved-confirm' && proceed(stage.pending, 'replace')}
+        onCancel={() => setStage({ kind: 'idle' })}
+      />
+
+      <ChooseModeDialog
+        open={stage.kind === 'choose-mode'}
+        onReplace={() => stage.kind === 'choose-mode' && replace(stage.pending)}
+        onAdd={() => stage.kind === 'choose-mode' && proceed(stage.pending, 'add')}
         onCancel={() => setStage({ kind: 'idle' })}
       />
 
@@ -161,9 +191,47 @@ export function ImportDataAssetButton({
         }
         confirmLabel="Load anyway"
         cancelLabel="Cancel"
-        onConfirm={() => stage.kind === 'validation-confirm' && apply(stage.pending)}
+        onConfirm={() => stage.kind === 'validation-confirm' && apply(stage.pending, stage.mode)}
         onCancel={() => setStage({ kind: 'idle' })}
       />
     </>
+  );
+}
+
+/**
+ * Three-way choice shown when a compatible ontology document is already loaded:
+ * replace the active model, add the DataAsset's entities to the current session,
+ * or cancel. Built on the local `Modal` so it renders without PDS web components.
+ */
+function ChooseModeDialog({
+  open,
+  onReplace,
+  onAdd,
+  onCancel,
+}: Readonly<{
+  open: boolean;
+  onReplace: () => void;
+  onAdd: () => void;
+  onCancel: () => void;
+}>) {
+  return (
+    <Modal open={open} onClose={onCancel}>
+      <h2 className="text-lg font-semibold text-content">Add to session or replace?</h2>
+      <div className="mt-2 text-sm text-content-muted">
+        A model is already loaded. You can add the Data Asset&apos;s entities to the current
+        session, or replace the active model with the imported Data Asset.
+      </div>
+      <div className="mt-5 flex justify-end gap-2">
+        <Button variant="secondary" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button variant="secondary" onClick={onReplace}>
+          Replace model
+        </Button>
+        <Button variant="primary" onClick={onAdd}>
+          Add to session
+        </Button>
+      </div>
+    </Modal>
   );
 }

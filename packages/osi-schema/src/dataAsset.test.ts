@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { dataAssetToOntology, DATA_ASSET_VENDOR, toConceptName } from './dataAsset.js';
+import { dataAssetToOntology, DATA_ASSET_VENDOR, mergeDataAssetOntology, toConceptName } from './dataAsset.js';
 import { importDataAssetText } from './import.js';
 import { parse } from './io.js';
 import { type DataAsset, type OntologyDocument } from './model.js';
@@ -170,5 +170,105 @@ describe('importDataAssetText', () => {
     expect(result.unsupported).toBeUndefined();
     expect(result.diagnostics).toEqual([]);
     expect((result.document as OntologyDocument).name).toBe('Vehicle Data');
+  });
+});
+
+describe('mergeDataAssetOntology', () => {
+  const first = dataAssetToOntology({
+    schemaVersion: '3.0.1',
+    name: 'First Asset',
+    identifier: 'id-first',
+    entities: {
+      customer: {
+        displayName: 'Customer',
+        classification: 'Confidential',
+        attributes: { email: { displayName: 'Email' } },
+      },
+    },
+  });
+
+  it('appends a second DataAsset onto the first', () => {
+    const second = dataAssetToOntology({
+      schemaVersion: '3.0.1',
+      name: 'Second Asset',
+      entities: { order: { displayName: 'Order', attributes: { total: { displayName: 'Total' } } } },
+    });
+    const merged = mergeDataAssetOntology(first, second);
+    const names = merged.ontology.map((c) => c.concept.name).sort((a, b) => a.localeCompare(b));
+    expect(names).toEqual(['Customer', 'Order']);
+    // The merged document is still valid and editable.
+    expect(validate(merged)).toEqual([]);
+  });
+
+  it('uniquifies a colliding concept name and rewrites its verbalizes templates', () => {
+    const collide = dataAssetToOntology({
+      schemaVersion: '3.0.1',
+      name: 'Collide Asset',
+      entities: {
+        customer: { displayName: 'Customer', attributes: { phone: { displayName: 'Phone' } } },
+      },
+    });
+    const merged = mergeDataAssetOntology(first, collide);
+    const names = merged.ontology.map((c) => c.concept.name);
+    expect(names).toEqual(['Customer', 'Customer_2']);
+    // The original Customer is untouched; the incoming one is renamed.
+    const original = merged.ontology.find((c) => c.concept.name === 'Customer');
+    expect(original?.relationships?.map((r) => r.name)).toEqual(['email']);
+    const renamed = merged.ontology.find((c) => c.concept.name === 'Customer_2');
+    const rel = renamed?.relationships?.find((r) => r.name === 'phone');
+    expect(rel?.verbalizes?.[0]).toBe('{Customer_2} phone {String}');
+  });
+
+  it('keeps non-colliding names unchanged', () => {
+    const second = dataAssetToOntology({
+      schemaVersion: '3.0.1',
+      name: 'Second Asset',
+      entities: { product: { displayName: 'Product', attributes: { sku: { displayName: 'SKU' } } } },
+    });
+    const merged = mergeDataAssetOntology(first, second);
+    const product = merged.ontology.find((c) => c.concept.name === 'Product');
+    expect(product).toBeDefined();
+    expect(product?.relationships?.find((r) => r.name === 'sku')?.verbalizes?.[0]).toBe(
+      '{Product} sku {String}',
+    );
+  });
+
+  it('accumulates preserved metadata from both DataAssets', () => {
+    const second = dataAssetToOntology({
+      schemaVersion: '3.0.1',
+      name: 'Second Asset',
+      identifier: 'id-second',
+      entities: { order: { displayName: 'Order', attributes: { total: { displayName: 'Total' } } } },
+    });
+    const merged = mergeDataAssetOntology(first, second);
+    const bag = merged.custom_extensions?.find((e) => e.vendor_name === DATA_ASSET_VENDOR);
+    expect(bag).toBeDefined();
+    const preserved: { dataAssets: Array<{ identifier?: string }> } = JSON.parse(bag?.data ?? '{}');
+    const identifiers = preserved.dataAssets
+      .map((d) => d.identifier)
+      .sort((a, b) => String(a).localeCompare(String(b)));
+    expect(identifiers).toEqual(['id-first', 'id-second']);
+  });
+
+  it('accumulates across a third merge without discarding earlier metadata', () => {
+    const second = dataAssetToOntology({
+      schemaVersion: '3.0.1',
+      name: 'Second Asset',
+      identifier: 'id-second',
+      entities: { order: { displayName: 'Order', attributes: { total: { displayName: 'Total' } } } },
+    });
+    const third = dataAssetToOntology({
+      schemaVersion: '3.0.1',
+      name: 'Third Asset',
+      identifier: 'id-third',
+      entities: { product: { displayName: 'Product', attributes: { sku: { displayName: 'SKU' } } } },
+    });
+    const merged = mergeDataAssetOntology(mergeDataAssetOntology(first, second), third);
+    const bag = merged.custom_extensions?.find((e) => e.vendor_name === DATA_ASSET_VENDOR);
+    const preserved: { dataAssets: Array<{ identifier?: string }> } = JSON.parse(bag?.data ?? '{}');
+    const identifiers = preserved.dataAssets
+      .map((d) => d.identifier)
+      .sort((a, b) => String(a).localeCompare(String(b)));
+    expect(identifiers).toEqual(['id-first', 'id-second', 'id-third']);
   });
 });
