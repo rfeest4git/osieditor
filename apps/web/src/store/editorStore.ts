@@ -51,6 +51,12 @@ interface EditorState {
   dirty: boolean;
   fileName: string | null;
   previewFormat: OsiFormat;
+  /** Whether the left navigator panel is collapsed (session UI state). */
+  navigatorCollapsed: boolean;
+  /** Whether the right source-preview panel is collapsed (session UI state). */
+  sourcePreviewCollapsed: boolean;
+  /** Whether the graph's right-hand selection-detail inspector is collapsed. */
+  inspectorCollapsed: boolean;
   /**
    * Monotonic counter bumped only when a *new* document is loaded/created (not on
    * edits). Views key one-shot layout work off this so a freshly loaded document
@@ -67,6 +73,11 @@ interface EditorState {
   setPreviewFormat: (format: OsiFormat) => void;
   select: (selection: Selection) => void;
   setActiveMapIndex: (index: number) => void;
+
+  // ---- layout ----
+  toggleNavigatorCollapsed: () => void;
+  toggleSourcePreviewCollapsed: () => void;
+  toggleInspectorCollapsed: () => void;
 
   // ---- model ----
   updateModel: (patch: Partial<SemanticModel>) => void;
@@ -223,6 +234,9 @@ export const useEditorStore = create<EditorState>()(
       dirty: false,
       fileName: null,
       previewFormat: 'yaml',
+      navigatorCollapsed: false,
+      sourcePreviewCollapsed: false,
+      inspectorCollapsed: false,
       docLoadId: 0,
 
       newModel: (name = 'untitled_model') =>
@@ -270,6 +284,21 @@ export const useEditorStore = create<EditorState>()(
       setPreviewFormat: (format) =>
         set((state) => {
           state.previewFormat = format;
+        }),
+
+      toggleNavigatorCollapsed: () =>
+        set((state) => {
+          state.navigatorCollapsed = !state.navigatorCollapsed;
+        }),
+
+      toggleSourcePreviewCollapsed: () =>
+        set((state) => {
+          state.sourcePreviewCollapsed = !state.sourcePreviewCollapsed;
+        }),
+
+      toggleInspectorCollapsed: () =>
+        set((state) => {
+          state.inspectorCollapsed = !state.inspectorCollapsed;
         }),
 
       select: (selection) =>

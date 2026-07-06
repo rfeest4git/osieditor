@@ -1,5 +1,6 @@
-import { PButton } from '@porsche-design-system/components-react';
+import { PButton, PButtonPure } from '@porsche-design-system/components-react';
 import { validate } from '@osi-editor/osi-schema';
+import type { Diagnostic } from '@osi-editor/osi-schema';
 import {
   Background,
   Controls,
@@ -245,7 +246,7 @@ function ArrangeControl({
   }, [nodesInitialized, layerKey, arrangedLayers, getNodes, fitView, arrange]);
 
   return (
-    <Panel position="top-right">
+    <Panel position="top-right" style={{ marginTop: 56 }}>
       <PButton type="button" compact icon="none" variant="secondary" onClick={arrange}>
         Arrange
       </PButton>
@@ -908,9 +909,7 @@ export function GraphView() {
           <GraphToolbar layer="semantic-model" />
           {semanticFlow}
         </div>
-        <aside className="w-96 shrink-0 overflow-auto border-l border-border bg-surface">
-          <SelectionDetail diagnostics={diagnostics} />
-        </aside>
+        <InspectorPanel diagnostics={diagnostics} />
       </div>
     );
   }
@@ -1019,9 +1018,51 @@ export function GraphView() {
         <GraphToolbar layer={layer} />
         {currentContent}
       </div>
-      <aside className="w-96 shrink-0 overflow-auto border-l border-border bg-surface">
-        <SelectionDetail diagnostics={diagnostics} />
-      </aside>
+      <InspectorPanel diagnostics={diagnostics} />
     </div>
+  );
+}
+
+/**
+ * The graph's right-hand selection-detail inspector, wrapped so it can be
+ * collapsed to a thin rail (reclaiming canvas width) and re-expanded on demand.
+ */
+function InspectorPanel({ diagnostics }: Readonly<{ diagnostics: Diagnostic[] }>) {
+  const collapsed = useEditorStore((s) => s.inspectorCollapsed);
+  const toggle = useEditorStore((s) => s.toggleInspectorCollapsed);
+
+  if (collapsed) {
+    return (
+      <div className="flex w-10 shrink-0 flex-col items-center border-l border-border bg-surface py-2">
+        <PButtonPure
+          icon="arrow-head-left"
+          hideLabel={true}
+          onClick={toggle}
+          aria-label="Expand details"
+          title="Expand details"
+        >
+          Expand details
+        </PButtonPure>
+      </div>
+    );
+  }
+
+  return (
+    <aside className="flex w-96 shrink-0 flex-col border-l border-border bg-surface">
+      <div className="flex items-center justify-end border-b border-border px-2 py-1.5">
+        <PButtonPure
+          icon="arrow-head-right"
+          hideLabel={true}
+          onClick={toggle}
+          aria-label="Collapse details"
+          title="Collapse details"
+        >
+          Collapse details
+        </PButtonPure>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        <SelectionDetail diagnostics={diagnostics} />
+      </div>
+    </aside>
   );
 }

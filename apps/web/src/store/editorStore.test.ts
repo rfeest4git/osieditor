@@ -55,6 +55,24 @@ describe('editor store', () => {
     const mi = useEditorStore.getState().addMetric();
     expect(useEditorStore.getState().selection).toEqual({ kind: 'metric', metricIndex: mi });
   });
+
+  it('toggles the navigator and source-preview panels independently', () => {
+    expect(useEditorStore.getState().navigatorCollapsed).toBe(false);
+    expect(useEditorStore.getState().sourcePreviewCollapsed).toBe(false);
+
+    useEditorStore.getState().toggleNavigatorCollapsed();
+    expect(useEditorStore.getState().navigatorCollapsed).toBe(true);
+    // Toggling one panel must not affect the other.
+    expect(useEditorStore.getState().sourcePreviewCollapsed).toBe(false);
+
+    useEditorStore.getState().toggleSourcePreviewCollapsed();
+    expect(useEditorStore.getState().sourcePreviewCollapsed).toBe(true);
+    expect(useEditorStore.getState().navigatorCollapsed).toBe(true);
+
+    useEditorStore.getState().toggleNavigatorCollapsed();
+    expect(useEditorStore.getState().navigatorCollapsed).toBe(false);
+    expect(useEditorStore.getState().sourcePreviewCollapsed).toBe(true);
+  });
 });
 
 describe('editor store — ontology documents', () => {

@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
+import { PButtonPure } from '@porsche-design-system/components-react';
 import { useState } from 'react';
 import { EditorPane } from '../components/editor/EditorPane.js';
 import { SourcePreview } from '../components/editor/SourcePreview.js';
@@ -14,10 +15,13 @@ type WorkspaceView = 'form' | 'graph';
 
 /**
  * The main workspace: a center pane that switches between the form editor and
- * the relationship graph, and a right-hand live source-preview pane.
+ * the relationship graph, and a right-hand live source-preview pane that can be
+ * collapsed to give the center pane more horizontal space.
  */
 function EditorWorkspace() {
   const doc = useEditorStore((s) => s.doc);
+  const previewCollapsed = useEditorStore((s) => s.sourcePreviewCollapsed);
+  const togglePreview = useEditorStore((s) => s.toggleSourcePreviewCollapsed);
   const [view, setView] = useState<WorkspaceView>('form');
 
   if (!doc) {
@@ -34,14 +38,29 @@ function EditorWorkspace() {
           <ViewTab active={view === 'graph'} onClick={() => setView('graph')}>
             Relationship graph
           </ViewTab>
+          {previewCollapsed && (
+            <div className="ml-auto hidden lg:block">
+              <PButtonPure
+                icon="arrow-head-left"
+                hideLabel={true}
+                onClick={togglePreview}
+                aria-label="Show source preview"
+                title="Show source preview"
+              >
+                Show source preview
+              </PButtonPure>
+            </div>
+          )}
         </div>
         <div className="min-h-0 flex-1 overflow-auto">
           {view === 'form' ? <EditorPane /> : <GraphView />}
         </div>
       </section>
-      <aside className="hidden w-96 shrink-0 border-l border-border bg-surface-sunken lg:block">
-        <SourcePreview />
-      </aside>
+      {!previewCollapsed && (
+        <aside className="hidden w-96 shrink-0 border-l border-border bg-surface-sunken lg:block">
+          <SourcePreview onCollapse={togglePreview} />
+        </aside>
+      )}
     </div>
   );
 }
