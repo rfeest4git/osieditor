@@ -37,6 +37,22 @@ export function metricNodeId(name: string): string {
   return `metric:${name}`;
 }
 
+/**
+ * Field/attribute count above which a concept or dataset node folds (renders
+ * header-only) by default, keeping oversized boxes from dominating the canvas.
+ * A single exported constant so it is easy to tune after a visual review.
+ */
+export const FOLD_THRESHOLD = 8;
+
+/**
+ * Default fold state for a node from its field/attribute count: expanded when the
+ * count is at or below {@link FOLD_THRESHOLD}, folded when it exceeds it. Pure; the
+ * user's explicit choice overrides this default in the view.
+ */
+export function defaultExpanded(fieldCount: number): boolean {
+  return fieldCount <= FOLD_THRESHOLD;
+}
+
 /** Top-left origin of the first node. */
 const LAYOUT_ORIGIN = 40;
 /** Horizontal gap left between two nodes on the same shelf row. */
@@ -248,6 +264,37 @@ function sortByHint(ids: string[], hint: Map<string, number>): string[] {
     const hb = hint.get(b) ?? Number.POSITIVE_INFINITY;
     return ha - hb || byId(a, b);
   });
+}
+
+/**
+ * Order ids left-to-right by the mean x ("barycenter") of their connected
+ * partners, the standard cheap crossing-reduction primitive (Sugiyama). Each id's
+ * neighbours come from `partnersOf` and their positions from `partnerX`; ids with
+ * no positioned partner sort last. Ties break by id so the order is deterministic.
+ */
+export function barycenterOrder(
+  ids: string[],
+  partnersOf: (id: string) => Iterable<string>,
+  partnerX: Map<string, number>,
+): string[] {
+  const bary = new Map<string, number>();
+  for (const id of ids) {
+    let sum = 0;
+    let n = 0;
+    for (const p of partnersOf(id)) {
+      const x = partnerX.get(p);
+      if (x !== undefined) {
+        sum += x;
+        n += 1;
+      }
+    }
+    if (n > 0) bary.set(id, sum / n);
+  }
+  return [...ids].sort(
+    (a, b) =>
+      (bary.get(a) ?? Number.POSITIVE_INFINITY) - (bary.get(b) ?? Number.POSITIVE_INFINITY) ||
+      byId(a, b),
+  );
 }
 
 /**
@@ -537,6 +584,64 @@ function gridClusterCentres(
   return centres;
 }
 
+/**
+ * Order the packed clusters left-to-right to reduce crossings. Clusters are first
+ * seeded by their members' cross-band partner x (`orderHint`) so linked domains
+ * align, then refined by a barycenter pass over inter-cluster edges so clusters
+ * that connect to each other (the multi-hub case) sit adjacently. Deterministic:
+ * seeds and ties break by id. Mutates `clusters` in place; a no-op when there is
+ * nothing to order by (≤1 cluster, or no hint and no inter-cluster edges).
+ */
+function orderClustersInPlace(
+  clusters: Cluster[],
+  edges: LayoutEdge[],
+  orderHint: Map<string, number> | undefined,
+): void {
+  if (clusters.length < 2) return;
+  const clusterOf = new Map<string, number>();
+  clusters.forEach((c, i) => {
+    for (const id of c.centres.keys()) clusterOf.set(id, i);
+  });
+  const cadj = new Map<number, string[]>();
+  for (let i = 0; i < clusters.length; i++) cadj.set(i, []);
+  for (const e of edges) {
+    const ci = clusterOf.get(e.source);
+    const cj = clusterOf.get(e.target);
+    if (ci === undefined || cj === undefined || ci === cj) continue;
+    cadj.get(ci)!.push(String(cj));
+    cadj.get(cj)!.push(String(ci));
+  }
+  const hasInterEdges = [...cadj.values()].some((a) => a.length > 0);
+  if (!orderHint && !hasInterEdges) return;
+
+  const memberHint = (i: number): number => {
+    if (!orderHint) return Number.POSITIVE_INFINITY;
+    const xs = [...clusters[i]!.centres.keys()]
+      .map((id) => orderHint.get(id))
+      .filter((v): v is number => v !== undefined);
+    return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : Number.POSITIVE_INFINITY;
+  };
+  const minMemberId = clusters.map((c) => [...c.centres.keys()].sort(byId)[0] ?? '');
+
+  // Seed by cross-band member barycenter, then by smallest member id.
+  let order = clusters
+    .map((_, i) => i)
+    .sort((a, b) => memberHint(a) - memberHint(b) || byId(minMemberId[a]!, minMemberId[b]!));
+
+  // Refine so mutually connected clusters sit adjacently (barycenter over the
+  // clusters' current ranks). Bounded sweeps keep the result deterministic.
+  if (hasInterEdges) {
+    for (let s = 0; s < 4; s++) {
+      const rank = new Map<string, number>();
+      order.forEach((c, i) => rank.set(String(c), i));
+      order = barycenterOrder(order.map(String), (cs) => cadj.get(Number(cs)) ?? [], rank).map(
+        Number,
+      );
+    }
+  }
+  clusters.splice(0, clusters.length, ...order.map((i) => clusters[i]!));
+}
+
 /** Lay out a flat box set (single domain) and report the resulting bounding size. */
 function layoutBoxSet(
   boxes: LayoutBox[],
@@ -574,17 +679,10 @@ function layoutBoxSet(
     clusters.push(clusterBounds(gridClusterCentres(orderedEdgeless, boxById, gap), boxById));
   }
 
-  // Order clusters left-to-right by their partners' positions to reduce the
-  // number of crossing edges between this band and the one it aligns to.
-  if (orderHint) {
-    const clusterHint = (c: Cluster): number => {
-      const xs = [...c.centres.keys()]
-        .map((id) => orderHint.get(id))
-        .filter((v): v is number => v !== undefined);
-      return xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : Number.POSITIVE_INFINITY;
-    };
-    clusters.sort((a, b) => clusterHint(a) - clusterHint(b));
-  }
+  // Order clusters left-to-right to reduce crossings: by their cross-band partner
+  // positions (orderHint) and by inter-cluster edges so linked clusters sit
+  // adjacently instead of in raw component/id order.
+  orderClustersInPlace(clusters, edges, orderHint);
 
   // Pack the cluster bounding boxes apart so no two clusters overlap.
   const packBoxes: LayoutBox[] = clusters.map((c, i) => ({
@@ -634,10 +732,51 @@ export function starLayout(
 }
 
 /**
+ * Positional hint for one band: the mean x ("barycenter") of each band node's
+ * partners in the OTHER bands, read from `sourceX`. Same-band edges are ignored so
+ * only cross-band links pull a node horizontally. Nodes with no positioned
+ * cross-band partner are omitted (they sort last when the hint is applied).
+ */
+function crossBandHint(
+  bandIds: Set<string>,
+  edges: LayoutEdge[],
+  sourceX: Map<string, number>,
+): Map<string, number> {
+  const partners = new Map<string, number[]>();
+  for (const e of edges) {
+    let inBand: string;
+    let other: string;
+    if (bandIds.has(e.source)) {
+      inBand = e.source;
+      other = e.target;
+    } else if (bandIds.has(e.target)) {
+      inBand = e.target;
+      other = e.source;
+    } else {
+      continue;
+    }
+    if (bandIds.has(other)) continue; // same-band edge: no cross-band pull
+    const ox = sourceX.get(other);
+    if (ox === undefined) continue;
+    (partners.get(inBand) ?? partners.set(inBand, []).get(inBand)!).push(ox);
+  }
+  const hint = new Map<string, number>();
+  for (const [id, xs] of partners) hint.set(id, xs.reduce((a, b) => a + b, 0) / xs.length);
+  return hint;
+}
+
+/**
  * Domain-aware star layout: lay out each band (domain) as its own star cluster and
  * stack the bands vertically so their bounding boxes never overlap. Used by the
  * unified view to keep the ontology and semantic-model clusters (and their region
  * boxes) spatially separated while each is arranged as a star.
+ *
+ * Cross-band edge crossings (mapping + relationship links) are minimised with
+ * alternating barycenter sweeps: every band is repeatedly re-ordered to sit above
+ * or below the mean x of its partners in the OTHER bands — not just the lower band
+ * once — so both bands align to each other. A fixed sweep count keeps it
+ * deterministic; the final pass stacks the bands at their real y so they never
+ * overlap regardless of any height change from re-ordering.
  */
 export function starLayoutGrouped(
   boxes: LayoutBox[],
@@ -645,43 +784,101 @@ export function starLayoutGrouped(
   options: StarLayoutOptions = {},
 ): Map<string, XYPosition> {
   const originX = options.originX ?? LAYOUT_ORIGIN;
-  let originY = options.originY ?? LAYOUT_ORIGIN;
+  const baseOriginY = options.originY ?? LAYOUT_ORIGIN;
   const groupGutter = options.groupGutter ?? STAR_GROUP_GUTTER;
-  const positions = new Map<string, XYPosition>();
-  // x of every node already placed in an earlier band, used to align later bands.
-  const priorX = new Map<string, number>();
   const bands = [...new Set(boxes.map((b) => b.band))].sort((a, b) => a - b);
-  for (const band of bands) {
-    const groupBoxes = boxes.filter((b) => b.band === band);
-    if (groupBoxes.length === 0) continue;
-    // Build a positional hint: for each node in this band, the mean x of its
-    // partners already placed in earlier bands. Later bands are then ordered to
-    // sit above/below their partners, minimising cross-layer edge crossings.
-    const idSet = new Set(groupBoxes.map((b) => b.id));
-    const partners = new Map<string, number[]>();
-    for (const e of edges) {
-      const inBand = idSet.has(e.source) ? e.source : idSet.has(e.target) ? e.target : undefined;
-      if (inBand === undefined) continue;
-      const other = inBand === e.source ? e.target : e.source;
-      const ox = priorX.get(other);
-      if (ox === undefined) continue;
-      (partners.get(inBand) ?? partners.set(inBand, []).get(inBand)!).push(ox);
-    }
-    const hint = new Map<string, number>();
-    for (const [id, xs] of partners) hint.set(id, xs.reduce((a, b) => a + b, 0) / xs.length);
-    const { positions: gp, height } = layoutBoxSet(groupBoxes, edges, {
+  const bandBoxes = bands.map((band) => boxes.filter((b) => b.band === band));
+  const bandIdSets = bandBoxes.map((bx) => new Set(bx.map((b) => b.id)));
+
+  // Working x per node id, refined by the sweeps. x is independent of originY, so
+  // the sweeps lay each band out at a throwaway y and only align horizontally.
+  const sweepX = new Map<string, number>();
+  const alignBand = (
+    i: number,
+    target: Map<string, XYPosition> | null,
+    originY: number,
+  ): number => {
+    const gb = bandBoxes[i]!;
+    if (gb.length === 0) return 0;
+    const hint = crossBandHint(bandIdSets[i]!, edges, sweepX);
+    const { positions, height } = layoutBoxSet(gb, edges, {
       ...options,
       originX,
       originY,
       orderHint: hint.size > 0 ? hint : undefined,
     });
-    for (const [id, p] of gp) {
-      positions.set(id, p);
-      priorX.set(id, p.x);
+    for (const [id, p] of positions) {
+      sweepX.set(id, p.x);
+      if (target) target.set(id, p);
     }
-    originY += height + groupGutter;
+    return height;
+  };
+
+  // Seed every band's x independently, then alternate barycenter sweeps so both
+  // bands converge onto each other's partner positions.
+  for (let i = 0; i < bandBoxes.length; i++) alignBand(i, null, baseOriginY);
+  const SWEEPS = 4;
+  for (let s = 0; s < SWEEPS; s++) {
+    if (s % 2 === 0) for (let i = bandBoxes.length - 1; i >= 0; i--) alignBand(i, null, baseOriginY);
+    else for (let i = 0; i < bandBoxes.length; i++) alignBand(i, null, baseOriginY);
+  }
+
+  // Final pass: lay each band at its real stacked y using the converged alignment,
+  // so the bands are separated by the group gutter and never overlap.
+  const positions = new Map<string, XYPosition>();
+  let originY = baseOriginY;
+  for (let i = 0; i < bandBoxes.length; i++) {
+    const height = alignBand(i, positions, originY);
+    if (bandBoxes[i]!.length > 0) originY += height + groupGutter;
   }
   return positions;
+}
+
+/** Orientation sign of the ordered triple (a, b, c): >0 ccw, <0 cw, 0 collinear. */
+function orient(a: XYPosition, b: XYPosition, c: XYPosition): number {
+  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+/** True when segments p1p2 and p3p4 properly cross at an interior point. */
+function segmentsIntersect(p1: XYPosition, p2: XYPosition, p3: XYPosition, p4: XYPosition): boolean {
+  const d1 = orient(p3, p4, p1);
+  const d2 = orient(p3, p4, p2);
+  const d3 = orient(p1, p2, p3);
+  const d4 = orient(p1, p2, p4);
+  return ((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0));
+}
+
+/**
+ * Count pairwise crossings among `edges` drawn as straight segments between node
+ * `positions` (pass node centres for the truest count). Edges that share an
+ * endpoint never count as crossing; an edge with an unpositioned endpoint is
+ * skipped. Pure O(E²) helper used to verify the layout's crossing reduction.
+ */
+export function countEdgeCrossings(
+  positions: Map<string, XYPosition>,
+  edges: LayoutEdge[],
+): number {
+  let count = 0;
+  for (let i = 0; i < edges.length; i++) {
+    for (let j = i + 1; j < edges.length; j++) {
+      const a = edges[i]!;
+      const b = edges[j]!;
+      if (
+        a.source === b.source ||
+        a.source === b.target ||
+        a.target === b.source ||
+        a.target === b.target
+      )
+        continue;
+      const p1 = positions.get(a.source);
+      const p2 = positions.get(a.target);
+      const p3 = positions.get(b.source);
+      const p4 = positions.get(b.target);
+      if (!p1 || !p2 || !p3 || !p4) continue;
+      if (segmentsIntersect(p1, p2, p3, p4)) count += 1;
+    }
+  }
+  return count;
 }
 
 /**

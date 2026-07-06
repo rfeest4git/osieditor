@@ -50,6 +50,7 @@ import {
   conceptNodeId,
   datasetFieldsById,
   datasetNodeId,
+  defaultExpanded,
   fieldNameFromHandleId,
   gridPosition,
   layoutEstimatedStar,
@@ -214,12 +215,16 @@ function ArrangeControl({
   layerKey,
   arrangedLayers,
   grouped = false,
+  onCollapseAll,
+  onExpandAll,
 }: Readonly<{
   edges: Edge[];
   setNodes: Dispatch<SetStateAction<Node[]>>;
   layerKey: string;
   arrangedLayers: RefObject<Set<string>>;
   grouped?: boolean;
+  onCollapseAll?: (ids: string[]) => void;
+  onExpandAll?: (ids: string[]) => void;
 }>) {
   const { getNodes, fitView } = useReactFlow();
   const nodesInitialized = useNodesInitialized();
@@ -257,10 +262,32 @@ function ArrangeControl({
   }, [nodesInitialized, layerKey, arrangedLayers, getNodes, fitView, arrange]);
 
   return (
-    <Panel position="top-right" style={{ marginTop: 56 }}>
+    <Panel position="top-right" style={{ marginTop: 56, display: 'flex', gap: 8 }}>
       <PButton type="button" compact icon="none" variant="secondary" onClick={arrange}>
         Arrange
       </PButton>
+      {onCollapseAll && (
+        <PButton
+          type="button"
+          compact
+          icon="none"
+          variant="secondary"
+          onClick={() => onCollapseAll(getNodes().map((n) => n.id))}
+        >
+          Collapse all
+        </PButton>
+      )}
+      {onExpandAll && (
+        <PButton
+          type="button"
+          compact
+          icon="none"
+          variant="secondary"
+          onClick={() => onExpandAll(getNodes().map((n) => n.id))}
+        >
+          Expand all
+        </PButton>
+      )}
     </Panel>
   );
 }
@@ -316,11 +343,17 @@ export function GraphView() {
   // one-shot measured auto-arrange for a freshly loaded doc's nodes.
   const docLoadId = useEditorStore((s) => s.docLoadId);
 
-  // Expand/collapse state shared by concept and dataset nodes across all layers.
-  // Tracking *collapsed* (not expanded) makes nodes default to expanded with no
-  // seeding. Keyed by stable node id (`concept:<name>` / `dataset:<name>`) so the
-  // set survives model reconciliation and view switches, like dragged positions.
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  // Per-node fold overrides shared by concept and dataset nodes across all
+  // layers. A PRESENT entry is the user's explicit choice (true = expanded,
+  // false = collapsed); an ABSENT entry falls back to the size-based default
+  // (large nodes fold — see `defaultExpanded`). Keyed by stable node id
+  // (`concept:<name>` / `dataset:<name>`) so it survives model reconciliation
+  // and view switches, like dragged positions.
+  const [foldOverride, setFoldOverride] = useState<Map<string, boolean>>(() => new Map());
+  const isExpanded = useCallback(
+    (id: string, fieldCount: number) => foldOverride.get(id) ?? defaultExpanded(fieldCount),
+    [foldOverride],
+  );
   // Layers whose nodes have already been auto-arranged (measured) once. Persists
   // across layer switches so switching back never re-arranges over the user's
   // manual positions; the "Arrange" button re-runs it explicitly.
@@ -331,14 +364,37 @@ export function GraphView() {
   useEffect(() => {
     arrangedLayers.current = new Set();
   }, [docLoadId]);
-  const toggleExpand = useCallback((id: string) => {
-    setCollapsed((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+  const toggleExpand = useCallback((id: string, fieldCount: number) => {
+    setFoldOverride((prev) => {
+      const next = new Map(prev);
+      // Record the negated EFFECTIVE state, so the first toggle always writes an
+      // explicit override — even for a node still on its size-based default.
+      next.set(id, !(prev.get(id) ?? defaultExpanded(fieldCount)));
       return next;
     });
   }, []);
+  // Collapse-all / expand-all over the supplied live node ids. Semantic-model
+  // dataset nodes use the raw name as their React Flow id but share fold state
+  // under `dataset:<name>`, so normalise to the shared fold key; metric nodes
+  // carry no fold state and are skipped.
+  const setFoldForNodes = useCallback((ids: string[], expanded: boolean) => {
+    setFoldOverride((prev) => {
+      const next = new Map(prev);
+      for (const id of ids) {
+        if (id.startsWith('metric:')) continue;
+        const key =
+          id.startsWith('concept:') || id.startsWith('dataset:') ? id : datasetNodeId(id);
+        next.set(key, expanded);
+      }
+      return next;
+    });
+  }, []);
+  const onCollapseAll = useCallback(
+    (ids: string[]) => setFoldForNodes(ids, false),
+    [setFoldForNodes],
+  );
+  const onExpandAll = useCallback((ids: string[]) => setFoldForNodes(ids, true), [setFoldForNodes]);
+
   const selectField = useCallback(
     (field: FieldRow) =>
       select({ kind: 'field', datasetIndex: field.datasetIndex, fieldIndex: field.fieldIndex }),
@@ -349,6 +405,27 @@ export function GraphView() {
   const model = getActiveModel(doc, activeModelIndex, activeMapIndex);
   const components = getOntologyComponents(doc);
   const diagnostics = useMemo(() => (doc ? validate(doc) : []), [doc]);
+  // Bound the fold-override map: drop entries for ids no longer in the model.
+  // Valid keys are every concept and dataset node id in the model, independent
+  // of the active layer (fold state is shared across layers).
+  useEffect(() => {
+    setFoldOverride((prev) => {
+      if (prev.size === 0) return prev;
+      const valid = new Set<string>();
+      for (const comp of components) {
+        const name = comp?.concept?.name;
+        if (name) valid.add(conceptNodeId(name));
+      }
+      for (const ds of model?.datasets ?? []) valid.add(datasetNodeId(ds.name));
+      let changed = false;
+      const next = new Map<string, boolean>();
+      for (const [id, v] of prev) {
+        if (valid.has(id)) next.set(id, v);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [components, model]);
 
   const [layer, setLayer] = useState<'unified' | 'semantic-model' | 'ontology'>(() =>
     isOnt ? 'unified' : 'semantic-model',
@@ -380,7 +457,7 @@ export function GraphView() {
         [
           ...model.datasets.map((dataset): EstimatedItem => {
             const fields = fieldsById.get(dataset.name) ?? [];
-            const expanded = !collapsed.has(datasetNodeId(dataset.name));
+            const expanded = isExpanded(datasetNodeId(dataset.name), fields.length);
             return {
               id: dataset.name,
               rows: (expanded ? fields.length : 0) + (dataset.description ? 2 : 0),
@@ -397,6 +474,7 @@ export function GraphView() {
       );
       const datasetNodes: Node[] = model.datasets.map((dataset, index) => {
         const expandKey = datasetNodeId(dataset.name);
+        const fields = fieldsById.get(dataset.name) ?? [];
         return {
           id: dataset.name,
           type: 'dataset',
@@ -404,9 +482,9 @@ export function GraphView() {
           data: {
             label: dataset.name,
             description: dataset.description,
-            fields: fieldsById.get(dataset.name) ?? [],
-            expanded: !collapsed.has(expandKey),
-            onToggleExpand: () => toggleExpand(expandKey),
+            fields,
+            expanded: isExpanded(expandKey, fields.length),
+            onToggleExpand: () => toggleExpand(expandKey, fields.length),
             onSelectField: selectField,
           },
           selected: dataset.name === selectedDatasetName,
@@ -424,7 +502,7 @@ export function GraphView() {
       });
       return [...datasetNodes, ...metricNodes];
     });
-  }, [model, selection, collapsed, toggleExpand, selectField]);
+  }, [model, selection, isExpanded, toggleExpand, selectField]);
 
   const edges = useMemo<Edge[]>(
     () => (model ? buildSemanticEdges(model, selection) : []),
@@ -521,7 +599,7 @@ export function GraphView() {
             const type = comp?.concept?.type;
             const description = comp?.concept?.description ?? comp?.description;
             const attrs = ontModel.attributesByConceptId.get(id) ?? [];
-            const expanded = !collapsed.has(id);
+            const expanded = isExpanded(id, attrs.length);
             return {
               id,
               rows: (expanded ? attrs.length : 0) + (description ? 2 : 0),
@@ -551,6 +629,7 @@ export function GraphView() {
         const name = comp?.concept?.name ?? `concept_${index + 1}`;
         const id = conceptNodeId(name);
         const type = comp?.concept?.type;
+        const attrs = ontModel.attributesByConceptId.get(id) ?? [];
         return {
           id,
           type: 'concept',
@@ -558,9 +637,9 @@ export function GraphView() {
           data: {
             label: type ? `${name} (${type})` : name,
             description: comp?.concept?.description ?? comp?.description,
-            attributes: ontModel.attributesByConceptId.get(id) ?? [],
-            expanded: !collapsed.has(id),
-            onToggleExpand: () => toggleExpand(id),
+            attributes: attrs,
+            expanded: isExpanded(id, attrs.length),
+            onToggleExpand: () => toggleExpand(id, attrs.length),
             onSelectAttribute: selectAttribute,
           },
           selected: selection?.kind === 'concept' && selection.componentIndex === index,
@@ -595,7 +674,7 @@ export function GraphView() {
     doc,
     activeMapIndex,
     ontModel,
-    collapsed,
+    isExpanded,
     toggleExpand,
     selectAttribute,
   ]);
@@ -709,7 +788,7 @@ export function GraphView() {
               const type = comp?.concept?.type;
               const description = comp?.concept?.description ?? comp?.description;
               const attrs = ontModel.attributesByConceptId.get(id) ?? [];
-              const expanded = !collapsed.has(id);
+              const expanded = isExpanded(id, attrs.length);
               return {
                 id,
                 rows: (expanded ? attrs.length : 0) + (description ? 2 : 0),
@@ -729,7 +808,7 @@ export function GraphView() {
             ...(model?.datasets ?? []).map((dataset): EstimatedItem => {
               const id = datasetNodeId(dataset.name);
               const fields = fieldsById.get(id) ?? [];
-              const expanded = !collapsed.has(id);
+              const expanded = isExpanded(id, fields.length);
               return {
                 id,
                 rows: (expanded ? fields.length : 0) + (dataset.description ? 2 : 0),
@@ -765,6 +844,7 @@ export function GraphView() {
         const name = comp?.concept?.name ?? `concept_${index + 1}`;
         const id = conceptNodeId(name);
         const type = comp?.concept?.type;
+        const attrs = ontModel.attributesByConceptId.get(id) ?? [];
         return {
           id,
           type: 'concept',
@@ -772,9 +852,9 @@ export function GraphView() {
           data: {
             label: type ? `${name} (${type})` : name,
             description: comp?.concept?.description ?? comp?.description,
-            attributes: ontModel.attributesByConceptId.get(id) ?? [],
-            expanded: !collapsed.has(id),
-            onToggleExpand: () => toggleExpand(id),
+            attributes: attrs,
+            expanded: isExpanded(id, attrs.length),
+            onToggleExpand: () => toggleExpand(id, attrs.length),
             onSelectAttribute: selectAttribute,
           },
           selected: selection?.kind === 'concept' && selection.componentIndex === index,
@@ -785,6 +865,7 @@ export function GraphView() {
         selection?.kind === 'dataset' ? model?.datasets[selection.datasetIndex]?.name : undefined;
       const datasetNodes: Node[] = (model?.datasets ?? []).map((dataset, index) => {
         const id = datasetNodeId(dataset.name);
+        const fields = fieldsById.get(id) ?? [];
         return {
           id,
           type: 'dataset',
@@ -792,9 +873,9 @@ export function GraphView() {
           data: {
             label: dataset.name,
             description: dataset.description,
-            fields: fieldsById.get(id) ?? [],
-            expanded: !collapsed.has(id),
-            onToggleExpand: () => toggleExpand(id),
+            fields,
+            expanded: isExpanded(id, fields.length),
+            onToggleExpand: () => toggleExpand(id, fields.length),
             onSelectField: selectField,
           },
           selected: dataset.name === selectedDatasetName,
@@ -834,7 +915,7 @@ export function GraphView() {
     doc,
     activeMapIndex,
     ontModel,
-    collapsed,
+    isExpanded,
     toggleExpand,
     selectAttribute,
     selectField,
@@ -958,6 +1039,8 @@ export function GraphView() {
         setNodes={setNodes}
         layerKey="semantic"
         arrangedLayers={arrangedLayers}
+        onCollapseAll={onCollapseAll}
+        onExpandAll={onExpandAll}
       />
     </ReactFlow>
   );
@@ -997,6 +1080,8 @@ export function GraphView() {
         setNodes={setOntNodes}
         layerKey="ontology"
         arrangedLayers={arrangedLayers}
+        onCollapseAll={onCollapseAll}
+        onExpandAll={onExpandAll}
       />
     </ReactFlow>
   );
@@ -1022,6 +1107,8 @@ export function GraphView() {
         layerKey="unified"
         arrangedLayers={arrangedLayers}
         grouped
+        onCollapseAll={onCollapseAll}
+        onExpandAll={onExpandAll}
       />
     </ReactFlow>
   );

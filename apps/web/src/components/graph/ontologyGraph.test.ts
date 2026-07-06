@@ -1,6 +1,14 @@
 import type { OntologyComponent } from '@osi-editor/osi-schema';
 import { describe, expect, it } from 'vitest';
-import { buildOntologyGraphModel, conceptNodeId } from './ontologyGraph.js';
+import {
+  buildOntologyGraphModel,
+  conceptNodeId,
+  countEdgeCrossings,
+  defaultExpanded,
+  starLayoutGrouped,
+  type LayoutBox,
+  type LayoutEdge,
+} from './ontologyGraph.js';
 
 function component(name: string, relationships: OntologyComponent['relationships']): OntologyComponent {
   return { concept: { name, type: 'EntityType' }, relationships };
@@ -131,5 +139,132 @@ describe('buildOntologyGraphModel', () => {
       relationshipIndex: 0,
     });
     expect(edges[0]?.selected).toBe(true);
+  });
+});
+
+describe('defaultExpanded', () => {
+  it('keeps small nodes expanded up to and including the fold threshold (8)', () => {
+    expect(defaultExpanded(0)).toBe(true);
+    expect(defaultExpanded(4)).toBe(true);
+    expect(defaultExpanded(8)).toBe(true);
+  });
+
+  it('folds large nodes with more fields than the threshold', () => {
+    expect(defaultExpanded(9)).toBe(false);
+    expect(defaultExpanded(50)).toBe(false);
+  });
+});
+
+describe('countEdgeCrossings', () => {
+  /** Node centres for a laid-out box set (positions are top-left corners). */
+  function centres(
+    boxes: LayoutBox[],
+    positions: Map<string, { x: number; y: number }>,
+  ): Map<string, { x: number; y: number }> {
+    const m = new Map<string, { x: number; y: number }>();
+    for (const b of boxes) {
+      const p = positions.get(b.id);
+      if (p) m.set(b.id, { x: p.x + b.width / 2, y: p.y + b.height / 2 });
+    }
+    return m;
+  }
+
+  it('counts a pair of edges that visibly cross (an X)', () => {
+    const positions = new Map<string, { x: number; y: number }>([
+      ['c1', { x: 0, y: 0 }],
+      ['c2', { x: 100, y: 0 }],
+      ['d1', { x: 0, y: 100 }],
+      ['d2', { x: 100, y: 100 }],
+    ]);
+    const edges: LayoutEdge[] = [
+      { source: 'c1', target: 'd2' },
+      { source: 'c2', target: 'd1' },
+    ];
+    expect(countEdgeCrossings(positions, edges)).toBe(1);
+  });
+
+  it('returns zero for parallel, non-crossing edges', () => {
+    const positions = new Map<string, { x: number; y: number }>([
+      ['c1', { x: 0, y: 0 }],
+      ['c2', { x: 100, y: 0 }],
+      ['d1', { x: 0, y: 100 }],
+      ['d2', { x: 100, y: 100 }],
+    ]);
+    const edges: LayoutEdge[] = [
+      { source: 'c1', target: 'd1' },
+      { source: 'c2', target: 'd2' },
+    ];
+    expect(countEdgeCrossings(positions, edges)).toBe(0);
+  });
+
+  it('ignores edges that merely share an endpoint', () => {
+    const positions = new Map<string, { x: number; y: number }>([
+      ['hub', { x: 50, y: 0 }],
+      ['a', { x: 0, y: 100 }],
+      ['b', { x: 100, y: 100 }],
+    ]);
+    const edges: LayoutEdge[] = [
+      { source: 'hub', target: 'a' },
+      { source: 'hub', target: 'b' },
+    ];
+    expect(countEdgeCrossings(positions, edges)).toBe(0);
+  });
+
+  it('detects a naive-placement crossing that starLayoutGrouped then removes', () => {
+    // Reversed cross-band pairing: with the bands in id order the two mapping
+    // edges cross; the grouped layout reorders the lower band to remove them.
+    const boxes: LayoutBox[] = [
+      { id: 'c1', width: 200, height: 100, band: 0 },
+      { id: 'c2', width: 200, height: 100, band: 0 },
+      { id: 'd1', width: 200, height: 100, band: 1 },
+      { id: 'd2', width: 200, height: 100, band: 1 },
+    ];
+    const mapping: LayoutEdge[] = [
+      { source: 'c1', target: 'd2' },
+      { source: 'c2', target: 'd1' },
+    ];
+    const naive = new Map<string, { x: number; y: number }>([
+      ['c1', { x: 0, y: 0 }],
+      ['c2', { x: 300, y: 0 }],
+      ['d1', { x: 0, y: 300 }],
+      ['d2', { x: 300, y: 300 }],
+    ]);
+    expect(countEdgeCrossings(naive, mapping)).toBeGreaterThan(0);
+
+    const positions = starLayoutGrouped(boxes, mapping);
+    expect(countEdgeCrossings(centres(boxes, positions), mapping)).toBe(0);
+  });
+
+  it('reduces cross-band crossings across multiple clusters per band', () => {
+    // Each band has two connected clusters (hub + leaf). The cross-band mapping
+    // links the clusters in reversed id order, so a naive id-order placement makes
+    // the two mapping edges cross; the inter-cluster ordering must realign them.
+    const top: LayoutBox[] = [
+      { id: 'a0', width: 200, height: 100, band: 0 },
+      { id: 'a1', width: 200, height: 100, band: 0 },
+      { id: 'b0', width: 200, height: 100, band: 0 },
+      { id: 'b1', width: 200, height: 100, band: 0 },
+    ];
+    const bottom: LayoutBox[] = [
+      { id: 'p0', width: 200, height: 100, band: 1 },
+      { id: 'p1', width: 200, height: 100, band: 1 },
+      { id: 'q0', width: 200, height: 100, band: 1 },
+      { id: 'q1', width: 200, height: 100, band: 1 },
+    ];
+    const boxes = [...top, ...bottom];
+    const intra: LayoutEdge[] = [
+      { source: 'a0', target: 'a1' },
+      { source: 'b0', target: 'b1' },
+      { source: 'p0', target: 'p1' },
+      { source: 'q0', target: 'q1' },
+    ];
+    // Reversed pairing: cluster A ↔ cluster Q, cluster B ↔ cluster P.
+    const cross: LayoutEdge[] = [
+      { source: 'a0', target: 'q0' },
+      { source: 'b0', target: 'p0' },
+    ];
+    const positions = starLayoutGrouped(boxes, [...intra, ...cross]);
+    // The sweep aligns the mapping edges so they no longer cross.
+    expect(countEdgeCrossings(centres(boxes, positions), cross)).toBe(0);
   });
 });
