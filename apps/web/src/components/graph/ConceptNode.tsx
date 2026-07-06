@@ -1,6 +1,6 @@
 import { PIcon } from '@porsche-design-system/components-react';
 import { Handle, Position, type NodeProps } from '@xyflow/react';
-import type { ConceptAttribute } from './ontologyGraph.js';
+import { fieldHandleId, type ConceptAttribute } from './ontologyGraph.js';
 
 /** Data carried by an expandable concept node. */
 export interface ConceptNodeData {
@@ -74,7 +74,18 @@ export function ConceptNode({ data, selected }: NodeProps) {
       {expanded && hasAttributes && (
         <ul className="border-t border-border">
           {attributes.map((attr) => (
-            <li key={`${attr.componentIndex}-${attr.relationshipIndex}`}>
+            <li
+              key={`${attr.componentIndex}-${attr.relationshipIndex}`}
+              className="relative"
+            >
+              {/* Per-field connect handles so a drag can start/end on a specific
+                  field; the namespaced `field:` id lets onOntConnect recover it. */}
+              <Handle
+                type="target"
+                position={Position.Left}
+                id={fieldHandleId(attr.name)}
+                className="!h-2 !w-2 !border !border-border !bg-surface-sunken"
+              />
               <button
                 type="button"
                 onClick={(e) => {
@@ -98,6 +109,12 @@ export function ConceptNode({ data, selected }: NodeProps) {
                   <span className="ml-auto truncate text-content/60">{attr.valueType}</span>
                 )}
               </button>
+              <Handle
+                type="source"
+                position={Position.Right}
+                id={fieldHandleId(attr.name)}
+                className="!h-2 !w-2 !border !border-border !bg-surface-sunken"
+              />
             </li>
           ))}
         </ul>

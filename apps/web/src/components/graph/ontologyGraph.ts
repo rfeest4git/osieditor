@@ -7,6 +7,26 @@ export function conceptNodeId(name: string): string {
   return `concept:${name}`;
 }
 
+/** Namespaced prefix for a per-field connect handle, distinct from node ids. */
+const FIELD_HANDLE_PREFIX = 'field:';
+
+/**
+ * Stable React Flow handle id for a concept attribute/field row. Namespaced with
+ * `field:` so it never collides with node ids (`concept:`). The field name is
+ * encoded so {@link fieldNameFromHandleId} can resolve a dragged connection back
+ * to the concrete field used in a `derived_by` join.
+ */
+export function fieldHandleId(attributeName: string): string {
+  return `${FIELD_HANDLE_PREFIX}${attributeName}`;
+}
+
+/** Recover the field/attribute name from a `field:` handle id, or `undefined`. */
+export function fieldNameFromHandleId(handleId: string | null | undefined): string | undefined {
+  if (typeof handleId !== 'string' || !handleId.startsWith(FIELD_HANDLE_PREFIX)) return undefined;
+  return handleId.slice(FIELD_HANDLE_PREFIX.length);
+}
+
+
 /** Stable React Flow node id for a mapped dataset node. */
 export function datasetNodeId(name: string): string {
   return `dataset:${name}`;

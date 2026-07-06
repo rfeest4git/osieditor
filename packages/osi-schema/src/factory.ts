@@ -70,18 +70,27 @@ export function createConcept(name = 'NewConcept'): Concept {
 /**
  * An ontology relationship. `verbalizes` is required by the schema, so seed a
  * template from the owning concept + relationship name.
+ *
+ * When `derivedBy` is provided, a `derived_by` join expression is seeded (e.g.
+ * `Source.field == Target.field`); otherwise `derived_by` is omitted so the user
+ * can complete the join themselves.
  */
 export function createOntologyRelationship(
   name = 'new_relationship',
   ownerConcept = 'NewConcept',
   roleConcept = 'String',
+  derivedBy?: string,
 ): OntologyRelationship {
-  return {
+  const relationship: OntologyRelationship = {
     name,
     roles: [{ concept: roleConcept }],
     verbalizes: [`{${ownerConcept}} ${name} {${roleConcept}}`],
     multiplicity: 'ManyToOne',
   };
+  if (derivedBy) {
+    relationship.derived_by = [derivedBy];
+  }
+  return relationship;
 }
 
 /** An ontology component wrapping a fresh concept. */

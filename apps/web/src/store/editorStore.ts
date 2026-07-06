@@ -120,7 +120,14 @@ interface EditorState {
   deleteConcept: (componentIndex: number) => void;
 
   // ---- ontology: relationships ----
-  addOntologyRelationship: (componentIndex: number) => number;
+  addOntologyRelationship: (
+    componentIndex: number,
+    options?: {
+      targetConcept?: string;
+      sourceField?: string;
+      targetField?: string;
+    },
+  ) => number;
   updateOntologyRelationship: (
     componentIndex: number,
     relationshipIndex: number,
@@ -503,19 +510,31 @@ export const useEditorStore = create<EditorState>()(
       },
 
       // ---- ontology: relationships ----
-      addOntologyRelationship: (componentIndex) => {
+      addOntologyRelationship: (componentIndex, options) => {
         let newIndex = -1;
         mutateOntology((components) => {
           const component = components[componentIndex];
           if (!component) return;
           component.relationships ??= [];
           const owner = component.concept?.name ?? 'Concept';
-          component.relationships.push(
-            createOntologyRelationship(
-              `relationship_${component.relationships.length + 1}`,
-              owner,
-            ),
-          );
+          const target = options?.targetConcept;
+          if (target) {
+            const name = `${owner}_${target}`;
+            const derivedBy =
+              options?.sourceField && options?.targetField
+                ? `${owner}.${options.sourceField} == ${target}.${options.targetField}`
+                : undefined;
+            component.relationships.push(
+              createOntologyRelationship(name, owner, target, derivedBy),
+            );
+          } else {
+            component.relationships.push(
+              createOntologyRelationship(
+                `relationship_${component.relationships.length + 1}`,
+                owner,
+              ),
+            );
+          }
           newIndex = component.relationships.length - 1;
         });
         set((state) => {

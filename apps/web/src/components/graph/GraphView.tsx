@@ -50,6 +50,7 @@ import {
   conceptNodeId,
   datasetFieldsById,
   datasetNodeId,
+  fieldNameFromHandleId,
   gridPosition,
   layoutEstimatedStar,
   layoutEstimatedStarGrouped,
@@ -622,14 +623,28 @@ export function GraphView() {
 
   const onOntConnect = useCallback(
     (connection: Connection) => {
-      const source = connection.source ?? '';
       const prefix = 'concept:';
-      if (!source.startsWith(prefix)) return;
+      const source = connection.source ?? '';
+      const target = connection.target ?? '';
+      if (!source.startsWith(prefix) || !target.startsWith(prefix)) return;
       const sourceName = source.slice(prefix.length);
+      const targetName = target.slice(prefix.length);
+      // Ignore self-links; a relationship needs two distinct concepts.
+      if (sourceName === targetName) return;
       const componentIndex = components.findIndex((c) => c?.concept?.name === sourceName);
-      // Creates the ontology relationship and selects it for editing (roles are
-      // filled in via the detail panel).
-      if (componentIndex >= 0) addOntologyRelationship(componentIndex);
+      if (componentIndex < 0) return;
+      // Recover the dragged fields from the field handles, when present, so the
+      // seeded relationship carries a `derived_by` join; body-to-body drags leave
+      // both undefined and the join empty.
+      const sourceField = fieldNameFromHandleId(connection.sourceHandle);
+      const targetField = fieldNameFromHandleId(connection.targetHandle);
+      // Creates the pre-populated ontology relationship (target role, verbalization,
+      // optional join) and selects it for editing in the detail panel.
+      addOntologyRelationship(componentIndex, {
+        targetConcept: targetName,
+        sourceField,
+        targetField,
+      });
     },
     [components, addOntologyRelationship],
   );
@@ -864,8 +879,15 @@ export function GraphView() {
       const target = connection.target ?? '';
       if (source.startsWith('concept:') && target.startsWith('concept:')) {
         const sourceName = source.slice('concept:'.length);
+        const targetName = target.slice('concept:'.length);
+        if (sourceName === targetName) return;
         const componentIndex = components.findIndex((c) => c?.concept?.name === sourceName);
-        if (componentIndex >= 0) addOntologyRelationship(componentIndex);
+        if (componentIndex >= 0)
+          addOntologyRelationship(componentIndex, {
+            targetConcept: targetName,
+            sourceField: fieldNameFromHandleId(connection.sourceHandle),
+            targetField: fieldNameFromHandleId(connection.targetHandle),
+          });
       } else if (source.startsWith('dataset:') && target.startsWith('dataset:')) {
         addRelationship({
           from: source.slice('dataset:'.length),

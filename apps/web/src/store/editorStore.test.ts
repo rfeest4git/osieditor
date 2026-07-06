@@ -117,6 +117,56 @@ describe('editor store — ontology documents', () => {
     });
   });
 
+  it('seeds a pre-populated relationship when a target concept and fields are given', () => {
+    const source = useEditorStore.getState().addConcept();
+    useEditorStore.getState().updateConcept(source, { name: 'Vehicle', type: 'EntityType' });
+    const ri = useEditorStore.getState().addOntologyRelationship(source, {
+      targetConcept: 'Owner',
+      sourceField: 'vin',
+      targetField: 'vin',
+    });
+    const doc = useEditorStore.getState().doc as {
+      ontology?: Array<{
+        relationships?: Array<{
+          name?: string;
+          roles?: Array<{ concept?: string }>;
+          verbalizes?: string[];
+          multiplicity?: string;
+          derived_by?: string[];
+        }>;
+      }>;
+    };
+    expect(doc.ontology?.[source]?.relationships?.[ri]).toMatchObject({
+      name: 'Vehicle_Owner',
+      roles: [{ concept: 'Owner' }],
+      verbalizes: ['{Vehicle} Vehicle_Owner {Owner}'],
+      multiplicity: 'ManyToOne',
+      derived_by: ['Vehicle.vin == Owner.vin'],
+    });
+    expect(useEditorStore.getState().selection).toEqual({
+      kind: 'ontology-relationship',
+      componentIndex: source,
+      relationshipIndex: ri,
+    });
+    expect(useEditorStore.getState().dirty).toBe(true);
+  });
+
+  it('seeds a target-role relationship without a join for body-to-body drags', () => {
+    const source = useEditorStore.getState().addConcept();
+    useEditorStore.getState().updateConcept(source, { name: 'Vehicle', type: 'EntityType' });
+    const ri = useEditorStore
+      .getState()
+      .addOntologyRelationship(source, { targetConcept: 'Owner' });
+    const doc = useEditorStore.getState().doc as {
+      ontology?: Array<{
+        relationships?: Array<{ derived_by?: string[]; roles?: Array<{ concept?: string }> }>;
+      }>;
+    };
+    const rel = doc.ontology?.[source]?.relationships?.[ri];
+    expect(rel?.roles).toEqual([{ concept: 'Owner' }]);
+    expect(rel?.derived_by).toBeUndefined();
+  });
+
   it('adds a concept mapping to the active map', () => {
     const cmi = useEditorStore.getState().addConceptMapping(0);
     useEditorStore.getState().updateConceptMapping(0, cmi, { concept: 'Airport' });
