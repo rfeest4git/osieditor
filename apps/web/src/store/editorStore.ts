@@ -10,6 +10,8 @@ import {
   createRelationship,
   detectDocumentKind,
   mergeDataAssetOntology,
+  mergeOutputPortIntoOntology,
+  mergeOutputPortModel,
   validate,
   type AnyDraftDocument,
   type Concept,
@@ -21,6 +23,7 @@ import {
   type OntologyComponent,
   type OntologyDocument,
   type OntologyRelationship,
+  type OsiDocument,
   type OsiDocumentKind,
   type OsiFormat,
   type Relationship,
@@ -93,6 +96,17 @@ interface EditorState {
    * marks the doc dirty, and preserves selection/indices and `docLoadId`.
    */
   mergeOntologyComponents: (incoming: OntologyDocument) => void;
+  /**
+   * Merge a converted Output Port semantic-model document into the loaded
+   * document without starting a new session. For a semantic-model document its
+   * datasets are appended to the active semantic model; for an ontology document
+   * its datasets are appended to the active nested semantic model
+   * (`ontology_mappings[activeMapIndex].semantic_model`), leaving the ontology's
+   * concepts and mappings intact. Uniquifies dataset-name collisions, accumulates
+   * port-level metadata, marks the doc dirty, and preserves selection/indices and
+   * `docLoadId`.
+   */
+  mergeSemanticModelDatasets: (incoming: OsiDocument) => void;
   markSaved: () => void;
   setPreviewFormat: (format: OsiFormat) => void;
   select: (selection: Selection) => void;
@@ -174,6 +188,15 @@ interface EditorState {
 /** True when the document is an OSI ontology document. */
 export function isOntologyDoc(doc: AnyDraftDocument | null): doc is OntologyDocument {
   return !!doc && 'ontology' in doc && Array.isArray((doc as { ontology?: unknown }).ontology);
+}
+
+/** True when the document is an OSI semantic-model document (not an ontology document). */
+export function isSemanticModelDoc(doc: AnyDraftDocument | null): doc is OsiDocument {
+  return (
+    !!doc &&
+    !isOntologyDoc(doc) &&
+    Array.isArray((doc as { semantic_model?: unknown }).semantic_model)
+  );
 }
 
 /**
@@ -332,6 +355,27 @@ export const useEditorStore = create<EditorState>()(
         // Merge against a plain snapshot (not an immer draft) so the helper's
         // spreads/reads produce a clean document, then replace the active doc.
         const merged = mergeDataAssetOntology(current, incoming);
+        set((state) => {
+          state.doc = merged;
+          state.dirty = true;
+        });
+      },
+
+      mergeSemanticModelDatasets: (incoming) => {
+        const current = get().doc;
+        // Merge against a plain snapshot (not an immer draft) so the helper's
+        // spreads/reads produce a clean document, then replace the active doc.
+        // `docLoadId`, selection, and indices are left untouched so the existing
+        // datasets/concepts keep their graph layout and selection.
+        let merged: AnyDraftDocument | null = null;
+        if (isSemanticModelDoc(current)) {
+          merged = mergeOutputPortModel(current, incoming);
+        } else if (isOntologyDoc(current)) {
+          // Ontology docs hold datasets in the active nested semantic model, so
+          // add the Output Port's tables there instead of discarding the ontology.
+          merged = mergeOutputPortIntoOntology(current, incoming, get().activeMapIndex);
+        }
+        if (!merged) return;
         set((state) => {
           state.doc = merged;
           state.dirty = true;

@@ -125,6 +125,62 @@ describe('POST /api/import-data-asset', () => {
   });
 });
 
+describe('POST /api/import-output-port', () => {
+  const outputPort = {
+    version: '1.0.0',
+    schemaVersion: '3.0.0',
+    outputPorts: [
+      {
+        name: 'PVH Base @ Datasphere DEV',
+        identifier: 'lx9782_1',
+        platform: 'LX9782',
+        tables: [
+          {
+            database: 'dev',
+            schema: 'VEH_PVH',
+            table: 'DP_PVH_CONSOLIDATED_MASTER',
+            fields: [{ name: 'VGUID', type: 'string' }],
+          },
+        ],
+      },
+    ],
+  };
+
+  it('converts a valid Output Port into a semantic-model document', async () => {
+    const res = await post('/api/import-output-port', {
+      text: JSON.stringify(outputPort),
+      filename: 'datasphere.json',
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.kind).toBe('semantic-model');
+    expect(body.document.semantic_model[0].name).toBe('PVH Base @ Datasphere DEV');
+    expect(body.document.semantic_model[0].datasets[0].source).toBe(
+      'dev.VEH_PVH.DP_PVH_CONSOLIDATED_MASTER',
+    );
+    expect(body.diagnostics).toEqual([]);
+  });
+
+  it('returns 422 with a parse error on malformed input', async () => {
+    const res = await post('/api/import-output-port', { text: '{not valid', filename: 'x.json' });
+    expect(res.status).toBe(422);
+    const body = await res.json();
+    expect(body.parseError.format).toBe('json');
+    expect(body.document).toBeUndefined();
+  });
+
+  it('rejects a non-Output-Port document as unsupported', async () => {
+    const res = await post('/api/import-output-port', {
+      text: JSON.stringify(validModel),
+      filename: 'sales.json',
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.unsupported.kind).toBe('unknown');
+    expect(body.document).toBeUndefined();
+  });
+});
+
 describe('POST /api/export', () => {
   it('exports as JSON with download headers', async () => {
     const res = await post('/api/export', { model: validModel, format: 'json' });

@@ -2,6 +2,7 @@ import { PTag } from '@porsche-design-system/components-react';
 import { ExportButton } from '../io/ExportButton.js';
 import { ImportButton } from '../io/ImportButton.js';
 import { ImportDataAssetButton } from '../io/ImportDataAssetButton.js';
+import { ImportOutputPortButton } from '../io/ImportOutputPortButton.js';
 import { NewModelButton } from '../io/NewModelButton.js';
 import { NewOntologyButton } from '../io/NewOntologyButton.js';
 import { getActiveModel, isOntologyDoc, useEditorStore } from '../../store/editorStore.js';
@@ -38,6 +39,7 @@ export function Header() {
         <NewOntologyButton variant="secondary" />
         <ImportButton variant="secondary" />
         <ImportDataAssetButton variant="secondary" />
+        <ImportOutputPortButton variant="secondary" />
         <ExportButton />
       </div>
     </header>

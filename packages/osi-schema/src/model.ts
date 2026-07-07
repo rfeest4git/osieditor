@@ -457,3 +457,75 @@ export function detectDataAsset(raw: unknown): boolean {
     !Array.isArray(entities)
   );
 }
+
+/* -------------------------------------------------------------------------- *
+ * Data product Output Port (import source)
+ *
+ * An Output Port document is a FOURTH input shape the editor can ingest —
+ * distinct from the OSI semantic-model, OSI ontology, and Collibra DataAsset
+ * documents above. It describes the physical tables and columns a data product
+ * exposes, and is converted one-way into an OSI semantic-model document (see
+ * `outputPortToSemanticModel`); it is never exported. This is a minimal Zod
+ * mirror of the Output Port shape covering only the fields the conversion needs;
+ * `.passthrough()` keeps every other key so nothing is lost when preserved into
+ * `custom_extensions`.
+ * -------------------------------------------------------------------------- */
+
+/** One column of an Output Port table. Required: `name`. */
+export const OutputPortFieldSchema = z
+  .object({
+    name: z.string(),
+    type: z.string().optional(),
+    entityAttribute: z.string().optional(),
+    filterRuleReference: z.string().optional(),
+  })
+  .passthrough();
+export type OutputPortField = z.infer<typeof OutputPortFieldSchema>;
+
+/** One physical table exposed by an Output Port. Required: `table`. */
+export const OutputPortTableSchema = z
+  .object({
+    table: z.string(),
+    description: z.string().optional(),
+    database: z.string().optional(),
+    schema: z.string().optional(),
+    identifier: z.string().optional(),
+    type: z.string().optional(),
+    fields: z.array(OutputPortFieldSchema).optional(),
+  })
+  .passthrough();
+export type OutputPortTable = z.infer<typeof OutputPortTableSchema>;
+
+/** One output port of a data product. Required: `name`, `tables`. */
+export const OutputPortSchema = z
+  .object({
+    name: z.string(),
+    description: z.string().optional(),
+    identifier: z.string().optional(),
+    platform: z.string().optional(),
+    tables: z.array(OutputPortTableSchema),
+  })
+  .passthrough();
+export type OutputPort = z.infer<typeof OutputPortSchema>;
+
+/** Data product Output Port document. Required: `schemaVersion`, `outputPorts`. */
+export const OutputPortDocumentSchema = z
+  .object({
+    schemaVersion: z.string(),
+    version: z.string().optional(),
+    outputPorts: z.array(OutputPortSchema),
+  })
+  .passthrough();
+export type OutputPortDocument = z.infer<typeof OutputPortDocumentSchema>;
+
+/**
+ * Recognize a data product Output Port root by its top-level shape: a non-array
+ * object carrying an `outputPorts` array and a `schemaVersion` string. This is
+ * distinct from OSI documents (`semantic_model`/`ontology` arrays) and from
+ * Collibra DataAssets (an `entities` map), so misclassification is unlikely.
+ */
+export function detectOutputPort(raw: unknown): boolean {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const obj = raw as Record<string, unknown>;
+  return typeof obj.schemaVersion === 'string' && Array.isArray(obj.outputPorts);
+}

@@ -61,6 +61,24 @@ export async function importDataAsset(
   throw new ApiError(`DataAsset import failed (${res.status})`, res.status);
 }
 
+/** Import a data product Output Port file text via the API, converting it one-way
+ * into an OSI semantic-model document. A 422 parse error is returned (not thrown). */
+export async function importOutputPort(
+  text: string,
+  fileName?: string,
+  format?: OsiFormat,
+): Promise<ImportResponse> {
+  const res = await fetch('/api/import-output-port', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, filename: fileName, format }),
+  });
+  if (res.status === 422 || res.ok) {
+    return (await res.json()) as ImportResponse;
+  }
+  throw new ApiError(`Output Port import failed (${res.status})`, res.status);
+}
+
 /** Export the model, returning the serialized text and a suggested filename. */
 export async function exportModel(
   model: AnyDraftDocument,

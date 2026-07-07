@@ -3,13 +3,17 @@ import {
   DataAssetSchema,
   DraftDocumentSchema,
   DraftOntologyDocumentSchema,
+  OutputPortDocumentSchema,
   detectDataAsset,
   detectDocumentKind,
+  detectOutputPort,
   type AnyOsiDocument,
   type DataAsset,
   type OsiDocumentKind,
+  type OutputPortDocument,
 } from './model.js';
 import { dataAssetToOntology } from './dataAsset.js';
+import { outputPortToSemanticModel } from './outputPort.js';
 import { validate, type Diagnostic } from './validation.js';
 
 export interface ImportResult {
@@ -155,4 +159,67 @@ export function importDataAssetText(
   const document = dataAssetToOntology(raw as DataAsset);
   const diagnostics = [...dataAssetDiagnostics(raw), ...validate(document)];
   return { format: fmt, kind: 'ontology', document, diagnostics };
+}
+
+/**
+ * Map Zod issues from an `OutputPortDocumentSchema` check into `Diagnostic`s so
+ * missing required Output Port fields (e.g. a table's `table` name) surface with
+ * the same "load anyway / cancel" UX as OSI import validation errors.
+ */
+function outputPortDiagnostics(raw: unknown): Diagnostic[] {
+  const result = OutputPortDocumentSchema.safeParse(raw);
+  if (result.success) return [];
+  return result.error.issues.map((issue) => {
+    const isMissing =
+      issue.code === 'invalid_type' &&
+      (issue as { received?: unknown }).received === 'undefined';
+    const fieldName = issue.path.length ? String(issue.path.at(-1)) : 'value';
+    return {
+      severity: 'error' as const,
+      code: isMissing ? 'required_field' : `schema_${issue.code}`,
+      message: isMissing ? `Missing required field "${fieldName}".` : issue.message,
+      path: [...issue.path],
+    };
+  });
+}
+
+/**
+ * Parse a data product Output Port document and convert it one-way into an OSI
+ * semantic-model document. Mirrors `importText`'s contract: a parse failure
+ * returns `{ parseError, ... }` without throwing; a non-Output-Port root returns
+ * `{ unsupported, ... }` and no document; otherwise the converted semantic model
+ * is returned with any Output Port/OSI validation diagnostics so callers can
+ * offer "load anyway / cancel".
+ */
+export function importOutputPortText(
+  text: string,
+  filename?: string,
+  format?: OsiFormat,
+): ImportResult {
+  const fmt = format ?? detectFormat(filename, text);
+  let raw: unknown;
+  try {
+    raw = parse(text, fmt);
+  } catch (err) {
+    if (err instanceof ParseError) {
+      return { format: fmt, diagnostics: [], parseError: { message: err.message, format: fmt } };
+    }
+    throw err;
+  }
+
+  if (!detectOutputPort(raw)) {
+    return {
+      format: fmt,
+      diagnostics: [],
+      unsupported: {
+        kind: 'unknown',
+        message:
+          'This file is not a data product Output Port. An Output Port has a top-level "outputPorts" array and a "schemaVersion".',
+      },
+    };
+  }
+
+  const document = outputPortToSemanticModel(raw as OutputPortDocument);
+  const diagnostics = [...outputPortDiagnostics(raw), ...validate(document)];
+  return { format: fmt, kind: 'semantic-model', document, diagnostics };
 }

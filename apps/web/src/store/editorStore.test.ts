@@ -1,4 +1,4 @@
-import { dataAssetToOntology, validate } from '@osi-editor/osi-schema';
+import { dataAssetToOntology, outputPortToSemanticModel, validate } from '@osi-editor/osi-schema';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { getActiveModel, getOntologyComponents, useEditorStore } from './editorStore.js';
 
@@ -72,6 +72,42 @@ describe('editor store', () => {
     useEditorStore.getState().toggleNavigatorCollapsed();
     expect(useEditorStore.getState().navigatorCollapsed).toBe(false);
     expect(useEditorStore.getState().sourcePreviewCollapsed).toBe(true);
+  });
+
+  it('merges an Output Port into the session, preserving datasets, selection, and identity', () => {
+    // Load a semantic-model document with one dataset as the base session.
+    const base = outputPortToSemanticModel({
+      schemaVersion: '3.0.0',
+      outputPorts: [
+        {
+          name: 'Base',
+          tables: [{ table: 'orders', database: 'db', schema: 'public', fields: [{ name: 'id', type: 'string' }] }],
+        },
+      ],
+    });
+    useEditorStore.getState().loadDocument(base);
+    const loadId = useEditorStore.getState().docLoadId;
+    useEditorStore.getState().select({ kind: 'dataset', datasetIndex: 0 });
+
+    const incoming = outputPortToSemanticModel({
+      schemaVersion: '3.0.0',
+      outputPorts: [
+        {
+          name: 'Incoming',
+          tables: [{ table: 'products', database: 'db', schema: 'public', fields: [{ name: 'sku', type: 'string' }] }],
+        },
+      ],
+    });
+    useEditorStore.getState().mergeSemanticModelDatasets(incoming);
+
+    const state = useEditorStore.getState();
+    const names = getActiveModel(state.doc, state.activeModelIndex)?.datasets.map((d) => d.name);
+    // Prior dataset retained and the incoming dataset appended.
+    expect(names).toEqual(['orders', 'products']);
+    // Selection and session identity (docLoadId) are preserved; doc is dirty.
+    expect(state.selection).toEqual({ kind: 'dataset', datasetIndex: 0 });
+    expect(state.docLoadId).toBe(loadId);
+    expect(state.dirty).toBe(true);
   });
 });
 
@@ -221,6 +257,42 @@ describe('editor store — ontology documents', () => {
     // Prior entity retained and new entity added.
     expect(names).toEqual(['Customer', 'Order']);
     // Selection is preserved and the session identity (docLoadId) is unchanged.
+    expect(state.selection).toEqual({ kind: 'concept', componentIndex: 0 });
+    expect(state.docLoadId).toBe(loadId);
+    expect(state.dirty).toBe(true);
+  });
+
+  it('adds an imported Output Port to a loaded ontology without clearing it', () => {
+    // Load an ontology (one concept) and seed a dataset in its nested model.
+    const base = dataAssetToOntology({
+      schemaVersion: '3.0.1',
+      name: 'Sales',
+      entities: { customer: { displayName: 'Customer', attributes: { email: { displayName: 'Email' } } } },
+    });
+    useEditorStore.getState().loadDocument(base);
+    const loadId = useEditorStore.getState().docLoadId;
+    const di = useEditorStore.getState().addDataset();
+    useEditorStore.getState().updateDataset(di, { name: 'orders', source: 'db.orders' });
+    useEditorStore.getState().select({ kind: 'concept', componentIndex: 0 });
+
+    const incoming = outputPortToSemanticModel({
+      schemaVersion: '3.0.0',
+      outputPorts: [
+        {
+          name: 'Incoming',
+          tables: [{ table: 'products', database: 'db', schema: 'public', fields: [{ name: 'sku', type: 'string' }] }],
+        },
+      ],
+    });
+    useEditorStore.getState().mergeSemanticModelDatasets(incoming);
+
+    const state = useEditorStore.getState();
+    // The Output Port's dataset is appended to the ontology's nested model...
+    const model = getActiveModel(state.doc, state.activeModelIndex, state.activeMapIndex);
+    expect((model?.datasets ?? []).map((d) => d.name)).toEqual(['orders', 'products']);
+    // ...and the ontology's concepts are left intact (nothing is cleared).
+    expect(getOntologyComponents(state.doc).map((c) => c.concept.name)).toEqual(['Customer']);
+    // Selection, session identity (docLoadId) preserved; doc is dirty.
     expect(state.selection).toEqual({ kind: 'concept', componentIndex: 0 });
     expect(state.docLoadId).toBe(loadId);
     expect(state.dirty).toBe(true);
