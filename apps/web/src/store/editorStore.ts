@@ -28,6 +28,11 @@ import {
 } from '@osi-editor/osi-schema';
 import { create } from 'zustand';
 import { immer } from 'zustand/middleware/immer';
+import {
+  clampPanelWidth,
+  PANEL_WIDTH_DEFAULTS,
+  type FullscreenRegion,
+} from '../lib/panelLayout.js';
 
 /** What's currently selected in the navigator / graph / forms. */
 export type Selection =
@@ -59,6 +64,17 @@ interface EditorState {
   sourcePreviewCollapsed: boolean;
   /** Whether the graph's right-hand selection-detail inspector is collapsed. */
   inspectorCollapsed: boolean;
+  /** Width (px) of the left navigator panel (session UI state). */
+  navigatorWidth: number;
+  /** Width (px) of the right source-preview panel (session UI state). */
+  sourcePreviewWidth: number;
+  /** Width (px) of the graph's selection-detail inspector (session UI state). */
+  inspectorWidth: number;
+  /**
+   * Which region, if any, is currently expanded to fill the whole workspace.
+   * Only one region can be full-screen at a time; `null` means normal layout.
+   */
+  fullscreenRegion: FullscreenRegion | null;
   /**
    * Monotonic counter bumped only when a *new* document is loaded/created (not on
    * edits). Views key one-shot layout work off this so a freshly loaded document
@@ -86,6 +102,16 @@ interface EditorState {
   toggleNavigatorCollapsed: () => void;
   toggleSourcePreviewCollapsed: () => void;
   toggleInspectorCollapsed: () => void;
+  /** Set the navigator width, clamped to the shared `[MIN, MAX]` bounds. */
+  setNavigatorWidth: (width: number) => void;
+  /** Set the source-preview width, clamped to the shared `[MIN, MAX]` bounds. */
+  setSourcePreviewWidth: (width: number) => void;
+  /** Set the inspector width, clamped to the shared `[MIN, MAX]` bounds. */
+  setInspectorWidth: (width: number) => void;
+  /** Toggle full-screen for a region (replaces any other; same region toggles off). */
+  toggleFullscreenRegion: (region: FullscreenRegion) => void;
+  /** Exit full-screen mode, restoring the prior layout. */
+  exitFullscreen: () => void;
 
   // ---- model ----
   updateModel: (patch: Partial<SemanticModel>) => void;
@@ -146,7 +172,7 @@ interface EditorState {
 }
 
 /** True when the document is an OSI ontology document. */
-export function isOntologyDoc(doc: AnyDraftDocument | null): boolean {
+export function isOntologyDoc(doc: AnyDraftDocument | null): doc is OntologyDocument {
   return !!doc && 'ontology' in doc && Array.isArray((doc as { ontology?: unknown }).ontology);
 }
 
@@ -252,6 +278,10 @@ export const useEditorStore = create<EditorState>()(
       navigatorCollapsed: false,
       sourcePreviewCollapsed: false,
       inspectorCollapsed: false,
+      navigatorWidth: PANEL_WIDTH_DEFAULTS.navigator,
+      sourcePreviewWidth: PANEL_WIDTH_DEFAULTS.sourcePreview,
+      inspectorWidth: PANEL_WIDTH_DEFAULTS.inspector,
+      fullscreenRegion: null,
       docLoadId: 0,
 
       newModel: (name = 'untitled_model') =>
@@ -326,6 +356,31 @@ export const useEditorStore = create<EditorState>()(
       toggleInspectorCollapsed: () =>
         set((state) => {
           state.inspectorCollapsed = !state.inspectorCollapsed;
+        }),
+
+      setNavigatorWidth: (width) =>
+        set((state) => {
+          state.navigatorWidth = clampPanelWidth(width);
+        }),
+
+      setSourcePreviewWidth: (width) =>
+        set((state) => {
+          state.sourcePreviewWidth = clampPanelWidth(width);
+        }),
+
+      setInspectorWidth: (width) =>
+        set((state) => {
+          state.inspectorWidth = clampPanelWidth(width);
+        }),
+
+      toggleFullscreenRegion: (region) =>
+        set((state) => {
+          state.fullscreenRegion = state.fullscreenRegion === region ? null : region;
+        }),
+
+      exitFullscreen: () =>
+        set((state) => {
+          state.fullscreenRegion = null;
         }),
 
       select: (selection) =>

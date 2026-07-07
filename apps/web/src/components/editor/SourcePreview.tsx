@@ -8,6 +8,9 @@ export function SourcePreview({ onCollapse }: Readonly<{ onCollapse?: () => void
   const doc = useEditorStore((s) => s.doc);
   const previewFormat = useEditorStore((s) => s.previewFormat);
   const setPreviewFormat = useEditorStore((s) => s.setPreviewFormat);
+  const fullscreen = useEditorStore((s) => s.fullscreenRegion);
+  const toggleFullscreen = useEditorStore((s) => s.toggleFullscreenRegion);
+  const isFullscreen = fullscreen === 'sourcePreview';
 
   const source = useMemo(() => {
     if (!doc) return '';
@@ -41,7 +44,7 @@ export function SourcePreview({ onCollapse }: Readonly<{ onCollapse?: () => void
               </button>
             ))}
           </div>
-          {onCollapse && (
+          {onCollapse && !isFullscreen && (
             <PButtonPure
               icon="arrow-head-right"
               hideLabel={true}
@@ -52,6 +55,15 @@ export function SourcePreview({ onCollapse }: Readonly<{ onCollapse?: () => void
               Collapse source preview
             </PButtonPure>
           )}
+          <PButtonPure
+            icon={isFullscreen ? 'close' : 'arrows'}
+            hideLabel={true}
+            onClick={() => toggleFullscreen('sourcePreview')}
+            aria-label={isFullscreen ? 'Exit full screen' : 'Maximize source preview'}
+            title={isFullscreen ? 'Exit full screen' : 'Maximize source preview'}
+          >
+            {isFullscreen ? 'Exit full screen' : 'Maximize source preview'}
+          </PButtonPure>
         </div>
       </div>
       <pre className="min-h-0 flex-1 overflow-auto p-3 font-mono text-xs leading-relaxed text-content">

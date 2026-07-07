@@ -20,6 +20,7 @@ import {
 import '@xyflow/react/dist/style.css';
 import {
   type Dispatch,
+  type ReactNode,
   type RefObject,
   type SetStateAction,
   useCallback,
@@ -35,6 +36,7 @@ import {
   useEditorStore,
 } from '../../store/editorStore.js';
 import { SelectionDetail } from '../editor/SelectionDetail.js';
+import { ResizeHandle } from '../shell/ResizeHandle.js';
 import { ConceptNode } from './ConceptNode.js';
 import { DatasetNode } from './DatasetNode.js';
 import { GraphEmptyState } from './GraphEmptyState.js';
@@ -1050,13 +1052,10 @@ export function GraphView() {
     if (!model) return null;
     if (model.datasets.length === 0) return <GraphEmptyState />;
     return (
-      <div className="flex h-full min-h-0">
-        <div className="relative min-w-0 flex-1">
-          <GraphToolbar layer="semantic-model" />
-          {semanticFlow}
-        </div>
-        <InspectorPanel diagnostics={diagnostics} />
-      </div>
+      <GraphShell diagnostics={diagnostics}>
+        <GraphToolbar layer="semantic-model" />
+        {semanticFlow}
+      </GraphShell>
     );
   }
 
@@ -1124,65 +1123,86 @@ export function GraphView() {
     layer === 'unified' ? unifiedContent : layer === 'ontology' ? ontologyContent : semanticContent;
 
   return (
-    <div className="flex h-full min-h-0">
-      <div className="relative min-w-0 flex-1">
-        <div className="absolute left-2 top-2 z-10 flex gap-2">
+    <GraphShell diagnostics={diagnostics}>
+      <div className="absolute left-2 top-2 z-10 flex gap-2">
+        <PButton
+          type="button"
+          compact
+          icon="none"
+          variant={layer === 'unified' ? 'primary' : 'secondary'}
+          onClick={() => setLayer('unified')}
+        >
+          Unified
+        </PButton>
+        <PButton
+          type="button"
+          compact
+          icon="none"
+          variant={layer === 'ontology' ? 'primary' : 'secondary'}
+          onClick={() => setLayer('ontology')}
+        >
+          Ontology
+        </PButton>
+        <PButton
+          type="button"
+          compact
+          icon="none"
+          variant={layer === 'semantic-model' ? 'primary' : 'secondary'}
+          onClick={() => setLayer('semantic-model')}
+        >
+          Semantic model
+        </PButton>
+        {layer === 'ontology' && (
           <PButton
             type="button"
             compact
             icon="none"
-            variant={layer === 'unified' ? 'primary' : 'secondary'}
-            onClick={() => setLayer('unified')}
+            variant={showMappings ? 'primary' : 'secondary'}
+            onClick={() => setShowMappings((v) => !v)}
           >
-            Unified
+            Show mappings
           </PButton>
-          <PButton
-            type="button"
-            compact
-            icon="none"
-            variant={layer === 'ontology' ? 'primary' : 'secondary'}
-            onClick={() => setLayer('ontology')}
-          >
-            Ontology
-          </PButton>
-          <PButton
-            type="button"
-            compact
-            icon="none"
-            variant={layer === 'semantic-model' ? 'primary' : 'secondary'}
-            onClick={() => setLayer('semantic-model')}
-          >
-            Semantic model
-          </PButton>
-          {layer === 'ontology' && (
-            <PButton
-              type="button"
-              compact
-              icon="none"
-              variant={showMappings ? 'primary' : 'secondary'}
-              onClick={() => setShowMappings((v) => !v)}
-            >
-              Show mappings
-            </PButton>
-          )}
-        </div>
-        <GraphToolbar layer={layer} />
-        {currentContent}
+        )}
       </div>
+      <GraphToolbar layer={layer} />
+      {currentContent}
+    </GraphShell>
+  );
+}
+
+/**
+ * Shared layout for the graph canvas + selection-detail inspector. Hides the
+ * canvas when the inspector is maximized so the inspector fills the workspace.
+ */
+function GraphShell({
+  children,
+  diagnostics,
+}: Readonly<{ children: ReactNode; diagnostics: Diagnostic[] }>) {
+  const inspectorFullscreen = useEditorStore((s) => s.fullscreenRegion === 'inspector');
+
+  return (
+    <div className="flex h-full min-h-0">
+      {!inspectorFullscreen && <div className="relative min-w-0 flex-1">{children}</div>}
       <InspectorPanel diagnostics={diagnostics} />
     </div>
   );
 }
 
 /**
- * The graph's right-hand selection-detail inspector, wrapped so it can be
- * collapsed to a thin rail (reclaiming canvas width) and re-expanded on demand.
+ * The graph's right-hand selection-detail inspector. It can be collapsed to a
+ * thin rail (reclaiming canvas width), resized by dragging its inner edge, or
+ * maximized to fill the workspace.
  */
 function InspectorPanel({ diagnostics }: Readonly<{ diagnostics: Diagnostic[] }>) {
   const collapsed = useEditorStore((s) => s.inspectorCollapsed);
   const toggle = useEditorStore((s) => s.toggleInspectorCollapsed);
+  const width = useEditorStore((s) => s.inspectorWidth);
+  const setWidth = useEditorStore((s) => s.setInspectorWidth);
+  const fullscreen = useEditorStore((s) => s.fullscreenRegion);
+  const toggleFullscreen = useEditorStore((s) => s.toggleFullscreenRegion);
+  const isFullscreen = fullscreen === 'inspector';
 
-  if (collapsed) {
+  if (collapsed && !isFullscreen) {
     return (
       <div className="flex w-10 shrink-0 flex-col items-center border-l border-border bg-surface py-2">
         <PButtonPure
@@ -1199,17 +1219,41 @@ function InspectorPanel({ diagnostics }: Readonly<{ diagnostics: Diagnostic[] }>
   }
 
   return (
-    <aside className="flex w-96 shrink-0 flex-col border-l border-border bg-surface">
-      <div className="flex items-center justify-end border-b border-border px-2 py-1.5">
+    <aside
+      className={`relative flex flex-col border-l border-border bg-surface ${
+        isFullscreen ? 'min-w-0 flex-1' : 'shrink-0'
+      }`}
+      style={isFullscreen ? undefined : { width }}
+    >
+      {!isFullscreen && (
+        <ResizeHandle
+          side="right"
+          getWidth={() => useEditorStore.getState().inspectorWidth}
+          setWidth={setWidth}
+          ariaLabel="Resize details"
+        />
+      )}
+      <div className="flex items-center justify-end gap-1 border-b border-border px-2 py-1.5">
         <PButtonPure
-          icon="arrow-head-right"
+          icon={isFullscreen ? 'close' : 'arrows'}
           hideLabel={true}
-          onClick={toggle}
-          aria-label="Collapse details"
-          title="Collapse details"
+          onClick={() => toggleFullscreen('inspector')}
+          aria-label={isFullscreen ? 'Exit full screen' : 'Maximize details'}
+          title={isFullscreen ? 'Exit full screen' : 'Maximize details'}
         >
-          Collapse details
+          {isFullscreen ? 'Exit full screen' : 'Maximize details'}
         </PButtonPure>
+        {!isFullscreen && (
+          <PButtonPure
+            icon="arrow-head-right"
+            hideLabel={true}
+            onClick={toggle}
+            aria-label="Collapse details"
+            title="Collapse details"
+          >
+            Collapse details
+          </PButtonPure>
+        )}
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
         <SelectionDetail diagnostics={diagnostics} />
