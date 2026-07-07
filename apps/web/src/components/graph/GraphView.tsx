@@ -42,6 +42,7 @@ import { DatasetNode } from './DatasetNode.js';
 import { GraphEmptyState } from './GraphEmptyState.js';
 import { GraphToolbar } from './GraphToolbar.js';
 import { MetricNode } from './MetricNode.js';
+import { ObstacleEdge } from './ObstacleEdge.js';
 import {
   buildMappingLinks,
   buildMetricRows,
@@ -74,11 +75,18 @@ const ontologyNodeTypes = { concept: ConceptNode, dataset: DatasetNode, metric: 
 const semanticNodeTypes = { dataset: DatasetNode, metric: MetricNode };
 
 /**
- * Default edge routing: orthogonal `smoothstep` so connection lines run in clear
- * horizontal/vertical segments (with the generous band gutters) instead of bezier
- * curves that cut diagonally across nodes.
+ * Custom edge types shared by every layer. The `obstacle` edge routes orthogonally
+ * around any node box that is not one of its two endpoints (see `ObstacleEdge`).
  */
-const smoothEdges = { type: 'smoothstep' as const };
+const edgeTypes = { obstacle: ObstacleEdge };
+
+/**
+ * Default edge routing: the obstacle-aware orthogonal `obstacle` edge so connection
+ * lines run in clear horizontal/vertical segments and bend around intervening node
+ * boxes instead of being drawn across them (replaces React Flow's obstacle-blind
+ * `smoothstep`).
+ */
+const smoothEdges = { type: 'obstacle' as const };
 
 const noop = () => {};
 
@@ -1027,6 +1035,7 @@ export function GraphView() {
       nodes={nodes}
       edges={edges}
       nodeTypes={semanticNodeTypes}
+      edgeTypes={edgeTypes}
       defaultEdgeOptions={smoothEdges}
       onNodesChange={onNodesChange}
       onConnect={onConnect}
@@ -1065,6 +1074,7 @@ export function GraphView() {
       nodes={ontNodes}
       edges={ontEdges}
       nodeTypes={ontologyNodeTypes}
+      edgeTypes={edgeTypes}
       defaultEdgeOptions={smoothEdges}
       onNodesChange={onOntNodesChange}
       onConnect={onOntConnect}
@@ -1091,6 +1101,7 @@ export function GraphView() {
       nodes={unifiedNodes}
       edges={unifiedEdges}
       nodeTypes={ontologyNodeTypes}
+      edgeTypes={edgeTypes}
       defaultEdgeOptions={smoothEdges}
       onNodesChange={onUnifiedNodesChange}
       onConnect={onUnifiedConnect}
